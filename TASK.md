@@ -8,9 +8,8 @@
 - 多轮对话、实时流式输出、停止生成，以及失败后的重试。
 - 思考内容或思考摘要与回答正文分别展示，思考区域可折叠。
 - 新建、切换、删除会话，保存并读取历史记录；重启 APP 后能继续原会话。
-- 真正可用的工具调用：实现 `get_current_time`，读取当前手机的系统时间，返回时间戳、当地日期时间和时区信息。
+- 真正可用的工具调用：实现 `search`、`fetch` 工具，使用 DeepsSeek 提供的网页搜索与抓取接口。
 - 清晰展示请求中、思考中、工具执行中、回答中、完成、已停止和失败等状态。
-- 给用户反应的时间，例如获取时间时给出延迟。
 - 前端界面简洁、精致、美观、有设计感，适合普通用户使用；要让用户意识到这是一个精心制作的 APP 而不是粗制滥造的 AI 垃圾。
 - 不得将功能堆满主界面，不要把任务要求写在前端。
 
@@ -18,7 +17,7 @@
 
 ## 二、DeepSeek
 
-使用官方 Responses API：
+对话使用官方 Responses API：
 
 - 地址：`https://api.deepseek.com/responses`
 - 模型：`deepseek-flash`、`deepseek-v4-pro`。
@@ -38,6 +37,40 @@
   "stream": true
 }
 ```
+
+Search 接口和 Fetch 接口使用官方 v1/tools API：
+
+- Search 接口按 query 搜索网页，返回结构化结果。该接口由 DeepSeek 自研搜索引擎提供支持。
+- Fetch 接口抓取单个网页，以 Markdown 文本返回页面内容。
+
+两者都是原始 JSON API，使用与 DeepSeek API 相同的 Bearer 鉴权。
+
+| API | Endpoint |
+| --- | -------- |
+| Search | `https://api.deepseek.com/v1/tools/search` |
+| Fetch | `https://api.deepseek.com/v1/tools/fetch` |
+
+请求体示意：
+
+Search：
+
+```json
+{
+  "query": "DeepSeek V4 模型 发布",
+  "count": 5,
+  "need_content": true
+}
+```
+
+Fetch：
+
+```json
+{
+  "url": "https://example.com/article"
+}
+```
+
+分别向用户和模型展示适合彼此的内容，不要把完整搜索结果或摘要展示给用户，这是对话 APP 不是搜索引擎，即便是搜索引擎也不会把结果全部一次性展示。
 
 ## 三、Inception Mercury
 
@@ -99,6 +132,8 @@
 - 支持同一轮内的多个工具调用，以及工具回传后再次调用工具；设置合理的循环上限。
 - 工具结果按各服务商的协议组织，保留调用标识及必要上下文。
 - 工具执行状态出现在对应的对话位置，多次调用后显示顺序正确。
+- 支持并行工具调用，节约用户时间。
+- 如为填写 DeepSeek API Key，应以合适方式降级。
 - 历史记录同时保存界面展示内容及继续请求所需的协议数据，包括思考内容、Gemini Parts 与签名、工具调用和结果。
 - 每个会话记住所用服务商、模型和相关选项。读取历史后，应能继续完成多轮对话和工具调用。
 
@@ -112,11 +147,15 @@
 - 生成过程中切换会话，迟到的数据不能写入其他会话。
 - 对无效 Key、限流、网络中断、超时和响应解析失败显示可理解的提示，保留已经收到的内容。
 - API Key 不得硬编码或写入日志，使用平台合适的安全存储方式。
+- 不同的报错交给不同目标，工具报错和模型报错应准确处理。
 
 ## 参考资料
 
 - DeepSeek 思考与工具调用：https://api-docs.deepseek.com/guides/thinking_mode/
 - Deepseek Responses API 指南：https://api-docs.deepseek.com/zh-cn/guides/responses_api
+- DeepSeek 网页搜索与抓取：https://api-docs.deepseek.com/zh-cn/guides/search
+- DeepSeek Search API 参考：https://api-docs.deepseek.com/zh-cn/api/search
+- DeepSeek Fetch API 参考：https://api-docs.deepseek.com/zh-cn/api/fetch
 - OpenAI Responses API 概览：https://developers.openai.com/api/reference/responses/overview
 - Mercury 模型：https://docs.inceptionlabs.ai/get-started/models
 - Mercury 流式与扩散：https://docs.inceptionlabs.ai/capabilities/streaming
