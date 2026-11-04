@@ -2,7 +2,7 @@
 
 ## 一、基本功能
 
-接入 DeepSeek、OpenAI、Inception Mercury 和 Google Gemini 四家 API，支持：
+接入 DeepSeek、OpenAI GPT、Inception Mercury 和 Google Gemini 四家 API，支持：
 
 - 选择服务商和模型，分别填写、保存 API Key 和 Base URL。
 - 多轮对话、实时流式输出、停止生成，以及失败后的重试。
@@ -17,7 +17,7 @@
 
 ## 二、DeepSeek
 
-对话使用官方 Anthropic Message API：
+对话使用官方 Anthropic Messages API：
 
 - 地址：`https://api.deepseek.com/anthropic`
 - 模型：`deepseek-flash`、`deepseek-v4-pro`。
@@ -177,7 +177,7 @@ Fetch：
 ## 参考资料
 
 - DeepSeek 思考与工具调用：https://api-docs.deepseek.com/guides/thinking_mode/
-- Deepseek Responses API 指南：https://api-docs.deepseek.com/zh-cn/guides/responses_api
+- Deepseek Messages API 指南：https://api-docs.deepseek.com/zh-cn/guides/anthropic_api
 - DeepSeek 网页搜索与抓取：https://api-docs.deepseek.com/zh-cn/guides/search
 - DeepSeek Search API 参考：https://api-docs.deepseek.com/zh-cn/api/search
 - DeepSeek Fetch API 参考：https://api-docs.deepseek.com/zh-cn/api/fetch
