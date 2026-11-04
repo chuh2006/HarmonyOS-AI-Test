@@ -2,9 +2,9 @@
 
 ## 一、基本功能
 
-接入 DeepSeek、Inception Mercury 和 Google Gemini 三家官方 API，支持：
+接入 DeepSeek、OpenAI、Inception Mercury 和 Google Gemini 四家 API，支持：
 
-- 选择服务商和模型，分别填写、保存 API Key。
+- 选择服务商和模型，分别填写、保存 API Key 和 Base URL。
 - 多轮对话、实时流式输出、停止生成，以及失败后的重试。
 - 思考内容或思考摘要与回答正文分别展示，思考区域可折叠。
 - 新建、切换、删除会话，保存并读取历史记录；重启 APP 后能继续原会话。
@@ -17,24 +17,25 @@
 
 ## 二、DeepSeek
 
-对话使用官方 Responses API：
+对话使用官方 Anthropic Message API：
 
-- 地址：`https://api.deepseek.com/responses`
+- 地址：`https://api.deepseek.com/anthropic`
 - 模型：`deepseek-flash`、`deepseek-v4-pro`。
 - 必须使用流式请求，实时展示 `reasoning_content` 和 `content`。
 - 支持开启、关闭思考，开启后可选 `low`、`high`、`max`，`none` 表示关闭思考。
 - 按官方要求正确保存和回传所需的思考内容。
+- 使用 `x-api-key: <API_KEY>` 或 `Authorization: Bearer <API_KEY>` 中的任一种方式鉴权。
 
 开启思考的请求体示意：
 
 ```json
 {
   "model": "deepseek-flash",
-  "input": "你好",
-  "reasoning": {
-    "effort": "none"
-  },
-  "stream": true
+  "messages": [{"role": "user", "content": "Say hello."}],
+  "max_tokens": 114514,
+  "thinking": {"type": "enabled"},
+  "output_config": {"effort": "high"},
+  "stream": false
 }
 ```
 
@@ -72,7 +73,31 @@ Fetch：
 
 分别向用户和模型展示适合彼此的内容，不要把完整搜索结果或摘要展示给用户，这是对话 APP 不是搜索引擎，即便是搜索引擎也不会把结果全部一次性展示。
 
-## 三、Inception Mercury
+## 三、OpenAI GPT
+
+使用官方 Responses API：
+
+- 地址 `https://api.openai.com/v1/responses`。
+- 模型：`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6.1-terra`、`gpt-6-luna`。
+- 必须使用流式请求并请求摘要，实时展示 `summary` 和 `content`。
+- 支持开启、关闭思考，可选 `reasoning.effort` 为 `low`、`medium`、`high`、`xhigh`、`max`，`none` 表示关闭思考。
+- 支持 `pro`、`standard` 两种 `reasoning.mode`。
+- 考虑到可自定义 base url，必须使用无状态 API 并按官方要求正确保存和回传所需的 `reasoning.encrypted_content` 及其他所有必要内容。
+- 对支持的模型允许开启 Fast 模式和 Ultrafast 模式。
+
+请求体示意：
+
+```json
+{
+  "model": "gpt-6-astra",
+  "input": "How much wood would a woodchuck chuck?",
+  "reasoning": {
+    "effort": "high"
+  }
+}
+```
+
+## 四、Inception Mercury
 
 使用官方 Chat Completions API：
 
@@ -96,7 +121,7 @@ Fetch：
 }
 ```
 
-## 四、Google Gemini
+## 五、Google Gemini
 
 本题使用 Gemini 原生 Generate Content REST API，接入 `gemini-3.8-flash`、`gemini-4-argon`：
 
@@ -124,20 +149,20 @@ Fetch：
 }
 ```
 
-## 五、工具调用与历史记录
+## 六、工具调用与历史记录
 
-- 三家服务商都要完成“模型请求工具 → APP 执行 → 回传结果 → 模型继续回答”的闭环。
+- 四家服务商都要完成“模型请求工具 → APP 执行 → 回传结果 → 模型继续回答”的闭环。
 - 工具是否调用由模型返回的结构化调用决定，不能根据用户输入关键词直接拼出回答。
 - 正确组装流式工具调用数据，在参数完整后执行；同一次调用只执行一次。
 - 支持同一轮内的多个工具调用，以及工具回传后再次调用工具；设置合理的循环上限。
 - 工具结果按各服务商的协议组织，保留调用标识及必要上下文。
 - 工具执行状态出现在对应的对话位置，多次调用后显示顺序正确。
 - 支持并行工具调用，节约用户时间。
-- 如为填写 DeepSeek API Key，应以合适方式降级。
+- 如未填写 DeepSeek API Key，应以合适方式降级。
 - 历史记录同时保存界面展示内容及继续请求所需的协议数据，包括思考内容、Gemini Parts 与签名、工具调用和结果。
 - 每个会话记住所用服务商、模型和相关选项。读取历史后，应能继续完成多轮对话和工具调用。
 
-## 六、流式处理与异常处理
+## 七、流式处理与异常处理
 
 - 使用 HarmonyOS 可用的网络能力自行实现 HTTP 和流式读取。第三方依赖须兼容 ArkTS 和当前项目环境。
 - 收到网络数据后及时更新界面，不能等整个响应结束后再逐字播放。
@@ -157,6 +182,10 @@ Fetch：
 - DeepSeek Search API 参考：https://api-docs.deepseek.com/zh-cn/api/search
 - DeepSeek Fetch API 参考：https://api-docs.deepseek.com/zh-cn/api/fetch
 - OpenAI Responses API 概览：https://developers.openai.com/api/reference/responses/overview
+- OpenAI 文本生成：https://developers.openai.com/api/docs/guides/text
+- OpenAI 模型思考模式：https://developers.openai.com/api/docs/guides/reasoning
+- OpenAI Fast 模式：https://developers.openai.com/api/docs/guides/fast-mode
+- OpenAI Ultrafast 模式：https://developers.openai.com/api/docs/guides/ultrafast-mode
 - Mercury 模型：https://docs.inceptionlabs.ai/get-started/models
 - Mercury 流式与扩散：https://docs.inceptionlabs.ai/capabilities/streaming
 - OpenAI Chat Completions API 概览：https://developers.openai.com/api/reference/chat-completions/overview
