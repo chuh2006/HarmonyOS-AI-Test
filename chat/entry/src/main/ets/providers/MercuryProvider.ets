@@ -200,7 +200,7 @@ export class MercuryProvider {
       model: config.modelId,
       messages: this.convertMessages(messages),
       stream: true,
-      max_tokens: config.maxTokens || 4096,
+      max_tokens: config.maxTokens || 8192, // 匹配模型定义的默认值
       tools: this.getToolDefinitions()
     };
     

@@ -33,7 +33,7 @@ interface DeepSeekRequest {
   max_tokens: number;
   stream: boolean;
   thinking?: { type: 'enabled' | 'disabled' };
-  reasoning_effort?: 'low' | 'high' | 'max';
+  output_config?: { effort: 'low' | 'high' | 'max' };
   tools?: DeepSeekTool[];
 }
 
@@ -199,15 +199,17 @@ export class DeepSeekProvider {
     const requestBody: DeepSeekRequest = {
       model: config.modelId,
       messages: this.convertMessages(messages),
-      max_tokens: config.maxTokens || 8192,
+      max_tokens: config.maxTokens || 114514, // 使用模型定义的值或合理默认值
       stream: true,
       tools: this.getToolDefinitions()
     };
     
-    // 思考配置(使用正确的参数名)
+    // 思考配置(按照TASK.md的Anthropic API示例)
     if (config.thinkingEnabled && config.thinkingEffort !== 'none') {
       requestBody.thinking = { type: 'enabled' };
-      requestBody.reasoning_effort = config.thinkingEffort as 'low' | 'high' | 'max';
+      requestBody.output_config = {
+        effort: config.thinkingEffort as 'low' | 'high' | 'max'
+      };
     } else {
       requestBody.thinking = { type: 'disabled' };
     }
