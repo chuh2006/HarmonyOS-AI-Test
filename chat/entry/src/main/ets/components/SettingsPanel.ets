@@ -77,11 +77,13 @@ export struct SettingsPanel {
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
 
-      Row({ space: 8 }) {
+      // 4个服务商标签长度不一，必须换行，否则最后一个会被挤出屏幕
+      Flex({ wrap: FlexWrap.Wrap }) {
         ForEach(this.providerIds(), (provider: ProviderId) => {
-          Button(getProviderName(provider))
+          Button(this.providerLabel(provider))
             .fontSize(12)
             .height(32)
+            .margin({ right: 6, bottom: 6 })
             .backgroundColor(this.selectedProvider === provider ? '#007AFF' : '#E5E5E5')
             .fontColor(this.selectedProvider === provider ? '#FFFFFF' : '#000000')
             .onClick(() => {
@@ -274,6 +276,20 @@ export struct SettingsPanel {
 
   private providerIds(): ProviderId[] {
     return ['deepseek', 'openai', 'mercury', 'gemini'];
+  }
+
+  // 按钮里用短名，避免一行放不下
+  private providerLabel(provider: ProviderId): string {
+    if (provider === 'openai') {
+      return 'OpenAI';
+    }
+    if (provider === 'mercury') {
+      return 'Mercury';
+    }
+    if (provider === 'gemini') {
+      return 'Gemini';
+    }
+    return 'DeepSeek';
   }
 
   private currentModel(): ModelInfo | undefined {

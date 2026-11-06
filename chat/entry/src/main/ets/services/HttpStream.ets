@@ -184,9 +184,24 @@ function buildRequestOptions(options: HttpRequestOptions): http.HttpRequestOptio
   return reqOptions;
 }
 
+// 抛出物不一定是Error实例，统一取可读文本
+export function thrownMessage(value: Object, fallback: string): string {
+  if (value instanceof Error && value.message.length > 0) {
+    return value.message;
+  }
+  if (typeof value === 'string' && (value as string).length > 0) {
+    return value as string;
+  }
+  return fallback;
+}
+
 // 真正的流式HTTP请求：
 // 使用 requestInStream + on('dataReceive') 实时接收数据块，
 // 用 TextDecoder(stream:true) 处理UTF-8跨分片，SseParser处理SSE事件跨分片。
+//
+// 非200响应的响应体不是SSE，必须整体缓冲后解析出服务端错误信息；
+// 状态码(dataReceive之前或之后到达都可能)与 dataEnd 两者齐备才能收尾，
+// 否则错误会被当成正常结束而静默丢失。
 export function httpStreamRequest(
   options: HttpRequestOptions,
   callbacks: StreamCallbacks,
@@ -197,6 +212,10 @@ export function httpStreamRequest(
   const decoder: util.TextDecoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
 
   let settled: boolean = false;
+  let statusCode: number = 0; // 0表示状态码尚未到达
+  let ended: boolean = false;
+  let pendingRaw: string = ''; // 状态码未知前先原样暂存
+  let errorBody: string = '';
   const provider: ProviderId | undefined = options.provider;
 
   const cleanup = (): void => {
@@ -218,6 +237,56 @@ export function httpStreamRequest(
     callbacks.onError(err);
   };
 
+  // 按当前状态码分发一段已解码文本
+  const handleText = (text: string): void => {
+    if (settled) {
+      return;
+    }
+    if (statusCode === 0) {
+      pendingRaw += text;
+      return;
+    }
+    if (statusCode !== 200) {
+      errorBody += text;
+      return;
+    }
+    try {
+      const events: SseEvent[] = parser.parse(text);
+      for (const event of events) {
+        if (settled) {
+          return;
+        }
+        callbacks.onData(event.data);
+      }
+    } catch (e) {
+      failWith(ChatError.parseError(thrownMessage(e as Object, '数据解析失败')));
+    }
+  };
+
+  // 状态码与数据流都到位后才能决定成功或失败
+  const finish = (): void => {
+    if (settled || !ended || statusCode === 0) {
+      return;
+    }
+    if (statusCode !== 200) {
+      settled = true;
+      cleanup();
+      callbacks.onError(ChatError.httpError(statusCode, extractErrorMessage(errorBody), provider));
+      return;
+    }
+    settled = true;
+    try {
+      const remaining: SseEvent | null = parser.flush();
+      if (remaining !== null && remaining.data.length > 0) {
+        callbacks.onData(remaining.data);
+      }
+    } catch (e) {
+      // 忽略flush错误
+    }
+    cleanup();
+    callbacks.onComplete();
+  };
+
   if (abortSignal !== undefined && abortSignal.aborted) {
     callbacks.onError(ChatError.stopped());
     httpRequest.destroy();
@@ -233,55 +302,43 @@ export function httpStreamRequest(
       failWith(ChatError.stopped());
       return;
     }
+    let text: string = '';
     try {
       // stream:true 保证多字节UTF-8字符跨分片时不产生乱码
       const decodeOptions: util.DecodeToStringOptions = { stream: true };
-      const text: string = decoder.decodeToString(new Uint8Array(data), decodeOptions);
-      const events: SseEvent[] = parser.parse(text);
-      for (const event of events) {
-        if (settled) {
-          return;
-        }
-        callbacks.onData(event.data);
-      }
+      text = decoder.decodeToString(new Uint8Array(data), decodeOptions);
     } catch (e) {
-      const err: Error = e instanceof Error ? e : new Error('数据解析失败');
-      failWith(ChatError.parseError(err.message));
+      failWith(ChatError.parseError(thrownMessage(e as Object, '数据解码失败')));
+      return;
     }
+    handleText(text);
   });
 
-  // 数据接收完毕：处理缓冲区剩余数据后完成
   httpRequest.on('dataEnd', () => {
     if (settled) {
       return;
     }
-    settled = true;
-    try {
-      const remaining: SseEvent | null = parser.flush();
-      if (remaining !== null && remaining.data.length > 0) {
-        callbacks.onData(remaining.data);
-      }
-    } catch (e) {
-      // 忽略flush错误
-    }
-    cleanup();
-    callbacks.onComplete();
+    ended = true;
+    finish();
   });
 
   // 发起流式请求；错误通过Promise rejection处理(SDK无'error'事件)
   httpRequest.requestInStream(options.url, buildRequestOptions(options))
     .then((responseCode: number) => {
-      if (responseCode !== 200) {
-        failWith(ChatError.httpError(responseCode, '流式请求失败', provider));
+      statusCode = responseCode;
+      if (pendingRaw.length > 0) {
+        const raw: string = pendingRaw;
+        pendingRaw = '';
+        handleText(raw);
       }
-      // 200时等待dataEnd事件
+      finish();
     })
     .catch((err: Error) => {
       if (abortSignal !== undefined && abortSignal.aborted) {
         failWith(ChatError.stopped());
         return;
       }
-      failWith(ChatError.networkError(err.message));
+      failWith(ChatError.networkError(thrownMessage(err as Object, '连接失败')));
     });
 }
 
@@ -325,32 +382,74 @@ export function httpJsonRequest(
     })
     .catch((err: Error) => {
       httpRequest.destroy();
-      onError(ChatError.networkError(err.message));
+      onError(ChatError.networkError(thrownMessage(err as Object, '连接失败')));
     });
 }
 
 // 从错误响应体提取错误信息
+// 各家服务端字段形状不同(error对象/error字符串/message/detail)，
+// 且常带显式 null(如 OpenAI 的 "error": null、Mercury 的 "param": null)，
+// 只判 undefined 会直接抛 TypeError。
 export function extractErrorMessage(body: string): string {
-  if (body.length === 0) {
-    return '';
+  const trimmed: string = body.trim();
+  if (trimmed.length === 0) {
+    return '服务端未返回错误详情';
   }
   try {
-    const parsed: object = JSON.parse(body) as object;
-    const obj: Record<string, Object> = parsed as Record<string, Object>;
-    const errObj: Object | undefined = obj['error'];
-    if (errObj !== undefined) {
-      const errRecord: Record<string, Object> = errObj as Record<string, Object>;
-      const msg: Object | undefined = errRecord['message'];
-      if (msg !== undefined && typeof msg === 'string') {
-        return msg as string;
-      }
-    }
-    const msg2: Object | undefined = obj['message'];
-    if (msg2 !== undefined && typeof msg2 === 'string') {
-      return msg2 as string;
+    const parsed: Object = JSON.parse(trimmed) as Object;
+    const message: string = readErrorText(parsed);
+    if (message.length > 0) {
+      return message;
     }
   } catch (e) {
     // 非JSON响应体
   }
-  return body.length > 200 ? body.substring(0, 200) : body;
+  return truncateText(trimmed, 300);
+}
+
+function truncateText(text: string, limit: number): string {
+  return text.length > limit ? `${text.substring(0, limit)}...` : text;
+}
+
+function isRecordValue(value: Object | undefined | null): boolean {
+  return value !== undefined && value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function readStringField(record: Record<string, Object>, key: string): string {
+  const value: Object | undefined = record[key];
+  if (value !== undefined && value !== null && typeof value === 'string') {
+    return value as string;
+  }
+  return '';
+}
+
+// 逐层查找 message：{error:{message}} / {error:"..."} / {message} / {detail}
+function readErrorText(parsed: Object | undefined | null): string {
+  if (!isRecordValue(parsed)) {
+    return '';
+  }
+  const root: Record<string, Object> = parsed as Record<string, Object>;
+  const errorValue: Object | undefined = root['error'];
+
+  if (errorValue !== undefined && errorValue !== null && typeof errorValue === 'string') {
+    return errorValue as string;
+  }
+  if (isRecordValue(errorValue)) {
+    const errorRecord: Record<string, Object> = errorValue as Record<string, Object>;
+    const message: string = readStringField(errorRecord, 'message');
+    if (message.length > 0) {
+      const code: string = readStringField(errorRecord, 'code');
+      return code.length > 0 ? `${message} (${code})` : message;
+    }
+  }
+
+  const directMessage: string = readStringField(root, 'message');
+  if (directMessage.length > 0) {
+    return directMessage;
+  }
+  const detailValue: Object | undefined = root['detail'];
+  if (detailValue !== undefined && detailValue !== null && typeof detailValue === 'string') {
+    return detailValue as string;
+  }
+  return '';
 }

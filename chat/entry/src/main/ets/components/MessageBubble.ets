@@ -1,5 +1,5 @@
 import { Message, ToolCall, ToolType } from '../types/Types';
-import { DeepSeekTools, ToolResult } from '../services/DeepSeekTools';
+import { DeepSeekTools } from '../services/DeepSeekTools';
 
 @Component
 export struct MessageBubble {
@@ -184,12 +184,12 @@ export struct MessageBubble {
     if (toolCall.status === 'pending' || toolCall.status === 'running') {
       return '';
     }
-    const result: ToolResult = {
-      success: toolCall.status === 'complete',
-      data: toolCall.result,
-      error: toolCall.error
-    };
-    return DeepSeekTools.getResultSummary(result);
+    if (toolCall.status === 'error') {
+      return toolCall.error !== undefined && toolCall.error.length > 0 ? toolCall.error : '执行失败';
+    }
+    // 给用户看的是一句话摘要，不是搜索/抓取到的正文
+    return toolCall.resultSummary !== undefined && toolCall.resultSummary.length > 0
+      ? toolCall.resultSummary : '完成';
   }
 
   private toolIcon(type: ToolType): string {

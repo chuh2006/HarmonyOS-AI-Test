@@ -8,6 +8,7 @@ import {
   ChatError
 } from '../types/Types';
 import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
+import { hasItems, hasText, listOr, numberOr, present, textOr } from '../services/Json';
 import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
 // ===== Chat Completions API 结构 =====
@@ -125,29 +126,30 @@ export class MercuryProvider implements ChatProvider {
     for (const msg of messages) {
       if (msg.role === 'tool') {
         // 工具结果消息
-        if (msg.toolCalls !== undefined) {
-          for (const tc of msg.toolCalls) {
-            const toolMsg: MercuryMessageJson = {
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: tc.result !== undefined ? tc.result : (tc.error !== undefined ? `工具执行失败: ${tc.error}` : '')
-            };
-            result.push(toolMsg);
-          }
+        for (const tc of listOr(msg.toolCalls)) {
+          const toolMsg: MercuryMessageJson = {
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: tc.result !== undefined ? tc.result : (tc.error !== undefined ? `工具执行失败: ${tc.error}` : '')
+          };
+          result.push(toolMsg);
         }
         continue;
+      }
+
+      const hasCalls: boolean = msg.role === 'assistant' && hasItems(msg.toolCalls);
+      if (msg.content.length === 0 && !hasCalls) {
+        continue; // 失败或被停止的空消息不进上下文
       }
 
       const outMsg: MercuryMessageJson = { role: msg.role };
       if (msg.content.length > 0) {
         outMsg.content = msg.content;
-      } else {
-        outMsg.content = '';
       }
 
-      if (msg.role === 'assistant' && msg.toolCalls !== undefined && msg.toolCalls.length > 0) {
+      if (hasCalls) {
         const calls: MercuryToolCallJson[] = [];
-        for (const tc of msg.toolCalls) {
+        for (const tc of msg.toolCalls as ToolCall[]) {
           const fn: MercuryFunctionDef = { name: tc.type, arguments: tc.arguments };
           const call: MercuryToolCallJson = { id: tc.id, type: 'function', function: fn };
           calls.push(call);
@@ -220,6 +222,8 @@ export class MercuryProvider implements ChatProvider {
     let currentThinking: string = '';
     const pendingTools: PendingTool[] = [];
     let completed: boolean = false;
+    let sawFinishReason: boolean = false;
+    let sawDone: boolean = false;
 
     const emitContent = (): void => {
       // 扩散与增量统一用content_replace上抛完整当前文本，UI直接替换显示
@@ -237,14 +241,18 @@ export class MercuryProvider implements ChatProvider {
       callbacks.onEvent(event);
     };
 
-    // 处理帧内tool_calls(增量帧累加参数; 全量帧直接取完整值; 按id去重)
-    const handleToolCalls = (calls: MercuryToolCallJson[], isFullFrame: boolean): void => {
+    // 处理帧内tool_calls。
+    // 增量帧累加参数；扩散全量帧的语义官方文档未明确，用前缀判断兼容两种情况：
+    // 新值以已累积内容为前缀说明是完整快照(直接替换)，否则按增量累加。
+    const handleToolCalls = (calls: MercuryToolCallJson[], fullFrame: boolean): void => {
       for (const callJson of calls) {
-        const fnName: string = callJson.function !== undefined && callJson.function.name !== undefined
-          ? callJson.function.name as string : '';
-        const fnArgs: string = callJson.function !== undefined && callJson.function.arguments !== undefined
-          ? callJson.function.arguments as string : '';
-        const callId: string = callJson.id !== undefined && callJson.id.length > 0 ? callJson.id : '';
+        if (callJson === undefined || callJson === null) {
+          continue;
+        }
+        const fn: MercuryFunctionDef | undefined = callJson.function;
+        const fnName: string = fn !== undefined && fn !== null ? textOr(fn.name) : '';
+        const fnArgs: string = fn !== undefined && fn !== null ? textOr(fn.arguments) : '';
+        const callId: string = textOr(callJson.id);
 
         // 查找已有pending(按id，id为空时按name+未完成状态)
         let pending: PendingTool | null = null;
@@ -273,19 +281,6 @@ export class MercuryProvider implements ChatProvider {
           };
           const startEvent: StreamEvent = { type: 'tool_call_start', toolCall: tc };
           callbacks.onEvent(startEvent);
-
-          // 全量帧: 参数已完整，直接可执行
-          if (isFullFrame && newPending.argsBuffer.length > 0) {
-            newPending.emitted = true;
-            const endTc: ToolCall = {
-              id: newPending.id,
-              type: newPending.name === 'fetch' ? 'fetch' : 'search',
-              arguments: newPending.argsBuffer,
-              status: 'pending'
-            };
-            const endEvent: StreamEvent = { type: 'tool_call_end', toolCall: endTc };
-            callbacks.onEvent(endEvent);
-          }
         } else {
           if (callId.length > 0 && pending.id.length === 0) {
             pending.id = callId;
@@ -293,11 +288,9 @@ export class MercuryProvider implements ChatProvider {
           if (fnName.length > 0 && pending.name.length === 0) {
             pending.name = fnName;
           }
-          if (isFullFrame) {
-            // 全量帧: 直接替换为完整参数
+          if (fullFrame && fnArgs.startsWith(pending.argsBuffer)) {
             pending.argsBuffer = fnArgs;
           } else {
-            // 增量帧: 累加参数
             pending.argsBuffer += fnArgs;
           }
 
@@ -309,37 +302,51 @@ export class MercuryProvider implements ChatProvider {
           };
           const deltaEvent: StreamEvent = { type: 'tool_call_delta', toolCall: tc };
           callbacks.onEvent(deltaEvent);
-
-          // 全量帧且参数完整: 可执行(只发射一次)
-          if (isFullFrame && !pending.emitted && pending.argsBuffer.length > 0) {
-            pending.emitted = true;
-            const endTc: ToolCall = {
-              id: pending.id,
-              type: pending.name === 'fetch' ? 'fetch' : 'search',
-              arguments: pending.argsBuffer,
-              status: 'pending'
-            };
-            const endEvent: StreamEvent = { type: 'tool_call_end', toolCall: endTc };
-            callbacks.onEvent(endEvent);
-          }
         }
       }
     };
 
-    // 完成所有未发射end的工具调用
+    // 应用一帧正文/思考/工具调用
+    const applyFrame = (frame: MercuryDeltaJson, isMessageFrame: boolean): void => {
+      if (hasText(frame.reasoning_content)) {
+        const think: string = textOr(frame.reasoning_content);
+        currentThinking += think;
+        const thinkEvent: StreamEvent = { type: 'thinking_delta', data: think };
+        callbacks.onEvent(thinkEvent);
+      }
+
+      // TASK.md: 只有结束信息、没有正文的事件不能清空已有内容
+      if (hasText(frame.content)) {
+        const text: string = textOr(frame.content);
+        // 官方文档: 扩散模式下每个chunk的content是当前阶段的全量文本，覆盖显示
+        if (useDiffusion || isMessageFrame) {
+          currentContent = text;
+        } else {
+          currentContent += text;
+        }
+        emitContent();
+      }
+
+      if (hasItems(frame.tool_calls)) {
+        handleToolCalls(frame.tool_calls as MercuryToolCallJson[], useDiffusion || isMessageFrame);
+      }
+    };
+
+    // 结束帧才是参数完整的权威信号，此时统一发射待执行的调用(同一次调用只发射一次)
     const flushPendingTools = (): void => {
       for (const p of pendingTools) {
-        if (!p.emitted) {
-          p.emitted = true;
-          const tc: ToolCall = {
-            id: p.id,
-            type: p.name === 'fetch' ? 'fetch' : 'search',
-            arguments: p.argsBuffer.length > 0 ? p.argsBuffer : '{}',
-            status: 'pending'
-          };
-          const endEvent: StreamEvent = { type: 'tool_call_end', toolCall: tc };
-          callbacks.onEvent(endEvent);
+        if (p.emitted || p.name.length === 0) {
+          continue;
         }
+        p.emitted = true;
+        const tc: ToolCall = {
+          id: p.id,
+          type: p.name === 'fetch' ? 'fetch' : 'search',
+          arguments: p.argsBuffer.length > 0 ? p.argsBuffer : '{}',
+          status: 'pending'
+        };
+        const endEvent: StreamEvent = { type: 'tool_call_end', toolCall: tc };
+        callbacks.onEvent(endEvent);
       }
     };
 
@@ -360,75 +367,76 @@ export class MercuryProvider implements ChatProvider {
           if (completed) {
             return;
           }
-          if (data.trim().length === 0 || data.trim() === '[DONE]') {
+          const trimmed: string = data.trim();
+          if (trimmed.length === 0) {
+            return;
+          }
+          if (trimmed === '[DONE]') {
+            sawDone = true;
             return;
           }
 
           let chunk: MercuryStreamChunkJson;
           try {
-            chunk = JSON.parse(data) as MercuryStreamChunkJson;
+            chunk = JSON.parse(trimmed) as MercuryStreamChunkJson;
           } catch (e) {
             return;
           }
 
-          if (chunk.usage !== undefined) {
+          if (present(chunk.usage)) {
+            const usageJson: MercuryUsageJson = chunk.usage as MercuryUsageJson;
             const usage: TokenUsage = {
-              inputTokens: chunk.usage.prompt_tokens,
-              outputTokens: chunk.usage.completion_tokens
+              inputTokens: numberOr(usageJson.prompt_tokens),
+              outputTokens: numberOr(usageJson.completion_tokens)
             };
             const usageEvent: StreamEvent = { type: 'usage', usage: usage };
             callbacks.onEvent(usageEvent);
           }
 
-          if (chunk.choices === undefined || chunk.choices.length === 0) {
-            return; // 只有元信息的帧
+          // 只有元信息的帧；choices 也可能是显式 null
+          if (!hasItems(chunk.choices)) {
+            return;
           }
 
-          const choice: MercuryChoiceJson = chunk.choices[0];
+          const choice: MercuryChoiceJson = (chunk.choices as MercuryChoiceJson[])[0];
 
-          // 扩散模式: message全量帧(去噪过程，同一条回答被反复修订)
-          if (choice.message !== undefined) {
-            const msgJson: MercuryMessageJson = choice.message;
-            // TASK.md: 处理只有结束信息、没有正文的事件——content缺失时不清空已有内容
-            if (msgJson.content !== undefined && msgJson.content.length >= 0) {
-              currentContent = msgJson.content;
-              emitContent();
-            }
-            if (msgJson.tool_calls !== undefined && msgJson.tool_calls.length > 0) {
-              handleToolCalls(msgJson.tool_calls, true);
-            }
+          // 流式帧: delta。扩散模式下 content 是当前阶段的全量文本，普通模式下是增量
+          if (present(choice.delta)) {
+            const delta: MercuryDeltaJson = choice.delta as MercuryDeltaJson;
+            applyFrame(delta, false);
           }
 
-          // 普通模式: delta增量帧
-          if (choice.delta !== undefined) {
-            const delta: MercuryDeltaJson = choice.delta;
-            if (delta.reasoning_content !== undefined && delta.reasoning_content.length > 0) {
-              currentThinking += delta.reasoning_content;
-              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: delta.reasoning_content };
-              callbacks.onEvent(thinkEvent);
-            }
-            if (delta.content !== undefined && delta.content.length > 0) {
-              currentContent += delta.content;
-              emitContent();
-            }
-            if (delta.tool_calls !== undefined && delta.tool_calls.length > 0) {
-              handleToolCalls(delta.tool_calls, false);
-            }
+          // 兼容非流式形状: message
+          if (present(choice.message)) {
+            const msgJson: MercuryMessageJson = choice.message as MercuryMessageJson;
+            const asDelta: MercuryDeltaJson = {
+              content: msgJson.content,
+              tool_calls: msgJson.tool_calls
+            };
+            applyFrame(asDelta, true);
           }
 
           // 结束帧: 定格最终文本(TASK.md: 扩散结束时准确显示最终文本)
-          if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
-            if (choice.finish_reason === 'tool_calls') {
+          if (present(choice.finish_reason)) {
+            const reason: string = textOr(choice.finish_reason);
+            sawFinishReason = true;
+            flushPendingTools();
+            if (reason === 'tool_calls') {
               // 当前阶段定格，工具回传后是新阶段，避免阶段互相覆盖
-              flushPendingTools();
               finalizedContent += currentContent;
               currentContent = '';
+            } else {
+              emitComplete();
             }
-            emitComplete();
           }
         },
 
         onComplete: () => {
+          if (!sawFinishReason && !sawDone && !completed) {
+            // 没有结束帧也没有[DONE]，说明连接被提前关闭，已收到的内容仍然保留
+            const errEvent: StreamEvent = { type: 'error', error: '响应在结束帧前中断，请重试' };
+            callbacks.onEvent(errEvent);
+          }
           flushPendingTools();
           // 连接结束前若有未上抛的当前内容，最后上抛一次，避免最后一帧丢失
           if (currentContent.length > 0 || finalizedContent.length > 0) {

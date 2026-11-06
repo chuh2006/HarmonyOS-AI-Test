@@ -26,6 +26,7 @@ import { MercuryProvider } from '../providers/MercuryProvider';
 import { GeminiProvider } from '../providers/GeminiProvider';
 import { DeepSeekTools, ToolResult } from './DeepSeekTools';
 import { AbortSignal } from './HttpStream';
+import { hasItems, hasText } from './Json';
 import { Store, MessagePatch } from './Store';
 
 // UI 回调
@@ -66,6 +67,7 @@ function cloneToolCall(toolCall: ToolCall, status: ToolStatus): ToolCall {
     arguments: toolCall.arguments,
     status: status,
     result: toolCall.result,
+    resultSummary: toolCall.resultSummary,
     error: toolCall.error,
     startTime: toolCall.startTime,
     endTime: toolCall.endTime
@@ -80,6 +82,33 @@ function findToolCall(toolCalls: ToolCall[], id: string): ToolCall | null {
     }
   }
   return null;
+}
+
+// 工具结果必须覆盖 assistant 发起的全部调用
+function coversAllToolCalls(calls: ToolCall[], results: ToolCall[] | undefined): boolean {
+  if (results === undefined || results === null) {
+    return false;
+  }
+  for (const call of calls) {
+    if (findToolCall(results, call.id) === null) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function withoutToolCalls(message: Message): Message {
+  const copy: Message = {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    thinking: message.thinking,
+    status: message.status,
+    timestamp: message.timestamp,
+    error: message.error,
+    protocolData: message.protocolData
+  };
+  return copy;
 }
 
 export class ChatEngine {
@@ -180,6 +209,50 @@ export class ChatEngine {
   }
 
   // 生成回复，内部处理工具调用多轮循环
+  // 组装请求前清洗历史：
+  // 出错、被停止或切换会话时，带工具调用的 assistant 消息可能已落库而对应的
+  // 工具结果没有落库。Anthropic 要求 tool_use 之后必须紧跟包含全部 tool_result 的
+  // user 消息，否则整条请求被拒——一个残缺的工具轮次会让会话之后永远无法继续。
+  private sanitizeHistory(history: Message[]): Message[] {
+    const result: Message[] = [];
+
+    for (let i = 0; i < history.length; i++) {
+      const msg: Message = history[i];
+
+      if (msg.role === 'tool') {
+        continue; // 只在 assistant 配对成功时一起push，孤立的工具结果丢弃
+      }
+
+      if (msg.role === 'assistant' && hasItems(msg.toolCalls)) {
+        const next: Message | null = i + 1 < history.length ? history[i + 1] : null;
+        const calls: ToolCall[] = msg.toolCalls as ToolCall[];
+        if (next !== null && next.role === 'tool' && coversAllToolCalls(calls, next.toolCalls)) {
+          result.push(msg);
+          result.push(next);
+          i++;
+          continue;
+        }
+        // 缺少工具结果：剥离工具调用，只保留文本，避免整条请求被服务端拒绝
+        if (msg.content.trim().length > 0 || hasText(msg.thinking)) {
+          result.push(withoutToolCalls(msg));
+        }
+        continue;
+      }
+
+      // 空的占位消息(失败/被停止)不进上下文
+      if (msg.role === 'assistant' && msg.content.trim().length === 0 && !hasText(msg.thinking)) {
+        continue;
+      }
+      if (msg.role === 'user' && msg.content.trim().length === 0) {
+        continue;
+      }
+
+      result.push(msg);
+    }
+
+    return result;
+  }
+
   private async generateResponse(
     sessionId: string,
     token: number,
@@ -187,7 +260,7 @@ export class ChatEngine {
     config: ModelConfig,
     callbacks: ChatCallbacks
   ): Promise<void> {
-    const messages: Message[] = history.slice();
+    const messages: Message[] = this.sanitizeHistory(history);
     let iteration: number = 0;
 
     while (iteration < MAX_TOOL_ITERATIONS) {
@@ -236,7 +309,13 @@ export class ChatEngine {
         return;
       }
 
-      const streamError: ChatError | null = acc.error;
+      const hasToolWork: boolean = acc.hasToolCalls && acc.toolCalls.length > 0;
+      let streamError: ChatError | null = acc.error;
+      if (streamError === null && !hasToolWork
+        && acc.content.trim().length === 0 && acc.thinking.trim().length === 0) {
+        // 服务端提前断开或响应被丢弃时会走到这里，不能当成一条正常的空回复
+        streamError = new ChatError('模型没有返回任何内容，请重试', 'EMPTY_RESPONSE', config.providerId);
+      }
       if (streamError !== null) {
         const errorPatch: MessagePatch = {
           content: acc.content,
@@ -258,7 +337,7 @@ export class ChatEngine {
 
       const protocolData: ProtocolData | undefined = this.toProtocolData(config.providerId, acc.protocolData);
 
-      if (acc.hasToolCalls && acc.toolCalls.length > 0) {
+      if (hasToolWork) {
         assistant.content = acc.content;
         assistant.thinking = acc.thinking.length > 0 ? acc.thinking : undefined;
         assistant.status = 'tool_call';
@@ -574,6 +653,7 @@ export class ChatEngine {
       arguments: toolCall.arguments,
       status: status,
       result: result.data,
+      resultSummary: result.summary,
       error: result.error,
       startTime: startTime,
       endTime: Date.now()
@@ -596,6 +676,7 @@ export class ChatEngine {
     if (providerId === 'openai' && data.openai !== undefined) {
       const openai: OpenAIProtocolData = {
         responseId: data.openai.responseId,
+        reasoningItemId: data.openai.reasoningItemId,
         encryptedContent: data.openai.encryptedContent
       };
       const result: ProtocolData = { openai: openai };

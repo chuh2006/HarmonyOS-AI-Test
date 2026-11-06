@@ -10,7 +10,17 @@ import {
   TokenUsage,
   generateId
 } from '../types/Types';
-import { httpStreamRequest, AbortSignal, extractErrorMessage } from '../services/HttpStream';
+import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
+import {
+  hasText,
+  listOr,
+  numberOr,
+  parseJsonObject,
+  present,
+  recordOrNull,
+  stringField,
+  textOr
+} from '../services/Json';
 import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
 // ===== Anthropic Messages API 结构 =====
@@ -92,6 +102,8 @@ export interface DeepSeekRequest {
   messages: AnthropicMessage[];
   max_tokens: number;
   stream: boolean;
+  // Anthropic格式的system是顶层参数，不在messages里
+  system?: string;
   thinking?: AnthropicThinkingConfig;
   output_config?: AnthropicOutputConfig;
   tools?: AnthropicTool[];
@@ -147,20 +159,6 @@ interface PendingToolCall {
   jsonBuffer: string;
 }
 
-// 工具参数以JSON字符串保存，回传时还原为对象
-function parseJsonObject(text: string): Record<string, Object> {
-  const empty: Record<string, Object> = {};
-  if (text.length === 0) {
-    return empty;
-  }
-  try {
-    const parsed: Object = JSON.parse(text) as Object;
-    return parsed as Record<string, Object>;
-  } catch (e) {
-    return empty;
-  }
-}
-
 export class DeepSeekProvider implements ChatProvider {
   private apiKey: string;
   private baseUrl: string;
@@ -172,28 +170,39 @@ export class DeepSeekProvider implements ChatProvider {
       : 'https://api.deepseek.com';
   }
 
+  // system 是顶层参数
+  private extractSystem(messages: Message[]): string {
+    const parts: string[] = [];
+    for (const msg of messages) {
+      if (msg.role === 'system' && msg.content.trim().length > 0) {
+        parts.push(msg.content.trim());
+      }
+    }
+    return parts.join('\n\n');
+  }
+
   // 转换消息为Anthropic格式
-  // 按官方要求：assistant的thinking块必须在工具调用回传时原样保留
-  private convertMessages(messages: Message[]): AnthropicMessage[] {
+  // 官方兼容文档: assistant 含 tool_use 时，紧接着必须是 user 消息且为全部调用提供 tool_result，
+  // tool_result 块要放在文本之前；思考模式下必须原样回传 assistant 的完整 content 数组(含 thinking)，
+  // 遗漏会导致服务端无法恢复而返回 400。关闭思考时则不能带 thinking 块。
+  private convertMessages(messages: Message[], includeThinking: boolean): AnthropicMessage[] {
     const result: AnthropicMessage[] = [];
 
     for (const msg of messages) {
       if (msg.role === 'system') {
-        continue; // Anthropic API的system是顶层参数，这里跳过
+        continue; // 顶层参数
       }
 
       if (msg.role === 'tool') {
         // 工具结果: user消息中的tool_result块
         const blocks: AnthropicContentBlock[] = [];
-        if (msg.toolCalls !== undefined) {
-          for (const tc of msg.toolCalls) {
-            const resultBlock: AnthropicContentBlock = {
-              type: 'tool_result',
-              tool_use_id: tc.id,
-              content: tc.result !== undefined ? tc.result : (tc.error !== undefined ? `工具执行失败: ${tc.error}` : '')
-            };
-            blocks.push(resultBlock);
-          }
+        for (const tc of listOr(msg.toolCalls)) {
+          const resultBlock: AnthropicContentBlock = {
+            type: 'tool_result',
+            tool_use_id: tc.id,
+            content: tc.result !== undefined ? tc.result : (tc.error !== undefined ? `工具执行失败: ${tc.error}` : '')
+          };
+          blocks.push(resultBlock);
         }
         if (blocks.length > 0) {
           const toolMsg: AnthropicMessage = { role: 'user', content: blocks };
@@ -204,28 +213,26 @@ export class DeepSeekProvider implements ChatProvider {
 
       const blocks: AnthropicContentBlock[] = [];
 
-      // assistant消息: 先thinking块(回传保存的思考内容)，再tool_use，最后text
+      // assistant消息: 先thinking块，再tool_use，最后text
       if (msg.role === 'assistant') {
         const savedThinking: string | undefined =
           msg.protocolData !== undefined && msg.protocolData.deepseek !== undefined
             ? msg.protocolData.deepseek.thinkingContent
             : undefined;
-        if (savedThinking !== undefined && savedThinking.length > 0) {
+        if (includeThinking && hasText(savedThinking)) {
           const thinkingBlock: AnthropicContentBlock = { type: 'thinking', thinking: savedThinking };
           blocks.push(thinkingBlock);
         }
 
-        if (msg.toolCalls !== undefined) {
-          for (const tc of msg.toolCalls) {
-            const inputObj: Record<string, Object> = parseJsonObject(tc.arguments);
-            const toolUseBlock: AnthropicContentBlock = {
-              type: 'tool_use',
-              id: tc.id,
-              name: tc.type,
-              input: inputObj
-            };
-            blocks.push(toolUseBlock);
-          }
+        for (const tc of listOr(msg.toolCalls)) {
+          const inputObj: Record<string, Object> = parseJsonObject(tc.arguments);
+          const toolUseBlock: AnthropicContentBlock = {
+            type: 'tool_use',
+            id: tc.id,
+            name: tc.type,
+            input: inputObj
+          };
+          blocks.push(toolUseBlock);
         }
       }
 
@@ -240,7 +247,29 @@ export class DeepSeekProvider implements ChatProvider {
       }
     }
 
-    return result;
+    return this.mergeSameRole(result);
+  }
+
+  // Anthropic 要求 user/assistant 交替出现：清洗历史后可能出现相邻同角色消息，
+  // 这里把它们的 content 块合并成一条(tool_result 块天然排在文本之前)
+  private mergeSameRole(messages: AnthropicMessage[]): AnthropicMessage[] {
+    const merged: AnthropicMessage[] = [];
+    for (const m of messages) {
+      const last: AnthropicMessage | null = merged.length > 0 ? merged[merged.length - 1] : null;
+      if (last !== null && last.role === m.role) {
+        for (const block of m.content) {
+          last.content.push(block);
+        }
+        continue;
+      }
+      const blocks: AnthropicContentBlock[] = [];
+      for (const block of m.content) {
+        blocks.push(block);
+      }
+      const entry: AnthropicMessage = { role: m.role, content: blocks };
+      merged.push(entry);
+    }
+    return merged;
   }
 
   // search/fetch工具定义(TASK.md: DeepSeek v1/tools接口)
@@ -274,6 +303,19 @@ export class DeepSeekProvider implements ChatProvider {
     return [searchTool, fetchTool];
   }
 
+  // 官方文档给出的 base_url 是 https://api.deepseek.com/anthropic，
+  // 用户可能填根域名也可能填带 /anthropic 的完整地址，两种都要能拼出正确端点
+  private messagesUrl(): string {
+    let base: string = this.baseUrl;
+    while (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    if (base.endsWith('/anthropic')) {
+      return `${base}/v1/messages`;
+    }
+    return `${base}/anthropic/v1/messages`;
+  }
+
   // 流式请求
   streamChat(
     messages: Message[],
@@ -281,19 +323,25 @@ export class DeepSeekProvider implements ChatProvider {
     callbacks: StreamChatCallbacks,
     abortSignal?: AbortSignal
   ): void {
-    const url: string = `${this.baseUrl}/anthropic/v1/messages`;
+    const url: string = this.messagesUrl();
+    const thinkingOn: boolean = config.thinkingEnabled && config.thinkingEffort !== 'none';
 
     const requestBody: DeepSeekRequest = {
       model: config.modelId,
-      messages: this.convertMessages(messages),
+      messages: this.convertMessages(messages, thinkingOn),
       // 不人为限制输出量：使用用户配置或模型能力值
       max_tokens: config.maxTokens !== undefined ? config.maxTokens : 128000,
       stream: true, // TASK.md: 必须使用流式请求
       tools: this.getToolDefinitions()
     };
 
+    const systemText: string = this.extractSystem(messages);
+    if (systemText.length > 0) {
+      requestBody.system = systemText;
+    }
+
     // 思考配置(TASK.md示例格式): thinking.type + output_config.effort，none表示关闭
-    if (config.thinkingEnabled && config.thinkingEffort !== 'none') {
+    if (thinkingOn) {
       const thinking: AnthropicThinkingConfig = { type: 'enabled' };
       requestBody.thinking = thinking;
       const outputConfig: AnthropicOutputConfig = { effort: config.thinkingEffort };
@@ -307,6 +355,7 @@ export class DeepSeekProvider implements ChatProvider {
     let thinkingBuffer: string = '';
     let pendingTool: PendingToolCall | null = null;
     let completed: boolean = false;
+    let sawMessageStop: boolean = false;
 
     const emitComplete = (): void => {
       if (completed) {
@@ -351,21 +400,24 @@ export class DeepSeekProvider implements ChatProvider {
             return; // 忽略无法解析的分片
           }
 
-          // 错误事件
-          if (evt.error !== undefined && evt.error.message !== undefined) {
-            const errEvent: StreamEvent = { type: 'error', error: evt.error.message };
+          // 错误帧: 官方文档说明超时会产生一个没有 type、只有 error 的无名 data 帧
+          const errorRecord: Record<string, Object> | null = recordOrNull(evt.error);
+          if (errorRecord !== null) {
+            const message: string = stringField(errorRecord, 'message');
+            const errEvent: StreamEvent = { type: 'error', error: message.length > 0 ? message : '服务端返回错误' };
             callbacks.onEvent(errEvent);
             return;
           }
 
-          const evtType: string = evt.type !== undefined ? evt.type : '';
+          const evtType: string = textOr(evt.type);
 
           if (evtType === 'content_block_start') {
             const block: StreamContentBlock | undefined = evt.content_block;
-            if (block !== undefined && block.type === 'tool_use') {
+            if (block !== undefined && block !== null && block.type === 'tool_use') {
+              const toolId: string = hasText(block.id) ? textOr(block.id) : generateId('toolu');
               pendingTool = {
-                id: block.id !== undefined ? block.id : generateId('toolu'),
-                name: block.name !== undefined ? block.name : '',
+                id: toolId,
+                name: textOr(block.name),
                 jsonBuffer: ''
               };
               const tc: ToolCall = {
@@ -382,28 +434,29 @@ export class DeepSeekProvider implements ChatProvider {
 
           if (evtType === 'content_block_delta') {
             const delta: StreamDelta | undefined = evt.delta;
-            if (delta === undefined) {
+            if (delta === undefined || delta === null) {
               return;
             }
-            const deltaType: string = delta.type !== undefined ? delta.type : '';
+            const deltaType: string = textOr(delta.type);
 
             // 思考增量
-            if (deltaType === 'thinking_delta' && delta.thinking !== undefined) {
-              thinkingBuffer += delta.thinking;
-              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: delta.thinking };
+            if (deltaType === 'thinking_delta' && hasText(delta.thinking)) {
+              const think: string = textOr(delta.thinking);
+              thinkingBuffer += think;
+              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: think };
               callbacks.onEvent(thinkEvent);
               return;
             }
             // 正文增量
-            if (deltaType === 'text_delta' && delta.text !== undefined) {
-              const contentEvent: StreamEvent = { type: 'content_delta', data: delta.text };
+            if (deltaType === 'text_delta' && hasText(delta.text)) {
+              const contentEvent: StreamEvent = { type: 'content_delta', data: textOr(delta.text) };
               callbacks.onEvent(contentEvent);
               return;
             }
             // 工具参数增量：参数完整后再执行
-            if (deltaType === 'input_json_delta' && delta.partial_json !== undefined) {
+            if (deltaType === 'input_json_delta' && hasText(delta.partial_json)) {
               if (pendingTool !== null) {
-                pendingTool.jsonBuffer += delta.partial_json;
+                pendingTool.jsonBuffer += textOr(delta.partial_json);
                 const tc: ToolCall = {
                   id: pendingTool.id,
                   type: pendingTool.name === 'fetch' ? 'fetch' : 'search',
@@ -434,11 +487,13 @@ export class DeepSeekProvider implements ChatProvider {
             return;
           }
 
+          // 官方文档: 以最后的 message_delta.usage 为本次用量，不与 message_start 相加
           if (evtType === 'message_delta') {
-            if (evt.usage !== undefined) {
+            if (present(evt.usage)) {
+              const usageJson: StreamUsage = evt.usage as StreamUsage;
               const usage: TokenUsage = {
-                inputTokens: evt.usage.input_tokens,
-                outputTokens: evt.usage.output_tokens
+                inputTokens: numberOr(usageJson.input_tokens),
+                outputTokens: numberOr(usageJson.output_tokens)
               };
               const usageEvent: StreamEvent = { type: 'usage', usage: usage };
               callbacks.onEvent(usageEvent);
@@ -447,23 +502,30 @@ export class DeepSeekProvider implements ChatProvider {
           }
 
           if (evtType === 'message_stop') {
+            sawMessageStop = true;
             emitComplete();
             return;
           }
 
           // 兼容DeepSeek原生字段(reasoning_content/content直出)
-          if (evt.reasoning_content !== undefined && evt.reasoning_content.length > 0) {
-            thinkingBuffer += evt.reasoning_content;
-            const thinkEvent: StreamEvent = { type: 'thinking_delta', data: evt.reasoning_content };
+          if (hasText(evt.reasoning_content)) {
+            const think: string = textOr(evt.reasoning_content);
+            thinkingBuffer += think;
+            const thinkEvent: StreamEvent = { type: 'thinking_delta', data: think };
             callbacks.onEvent(thinkEvent);
           }
-          if (evt.content !== undefined && evt.content.length > 0) {
-            const contentEvent: StreamEvent = { type: 'content_delta', data: evt.content };
+          if (hasText(evt.content)) {
+            const contentEvent: StreamEvent = { type: 'content_delta', data: textOr(evt.content) };
             callbacks.onEvent(contentEvent);
           }
         },
 
         onComplete: () => {
+          // 官方文档: 流中没有 data:[DONE]，未收到 message_stop 就断开表示响应不完整
+          if (!sawMessageStop && !completed) {
+            const errEvent: StreamEvent = { type: 'error', error: '响应在 message_stop 前中断，请重试' };
+            callbacks.onEvent(errEvent);
+          }
           emitComplete();
           callbacks.onComplete();
         },
@@ -474,10 +536,5 @@ export class DeepSeekProvider implements ChatProvider {
       },
       abortSignal
     );
-  }
-
-  // 从HTTP错误响应构建错误(非流式路径使用)
-  static buildHttpError(statusCode: number, body: string): ChatError {
-    return ChatError.httpError(statusCode, extractErrorMessage(body), 'deepseek');
   }
 }

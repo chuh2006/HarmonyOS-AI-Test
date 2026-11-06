@@ -2,9 +2,11 @@ import { httpJsonRequest, extractErrorMessage, JsonResponse, HttpRequestOptions 
 import { ChatError, ProviderSettings, ToolType } from '../types/Types';
 
 // 工具执行结果
+// data 给模型(完整内容)，summary 给用户(一句话，不含搜索结果正文)
 export interface ToolResult {
   success: boolean;
   data?: string;
+  summary?: string;
   error?: string;
 }
 
@@ -112,8 +114,13 @@ export class DeepSeekTools {
     this.apiKey = settings !== undefined && settings.apiKey !== undefined ? settings.apiKey : '';
     let base: string = settings !== undefined && settings.baseUrl !== undefined && settings.baseUrl.length > 0
       ? settings.baseUrl : 'https://api.deepseek.com';
-    if (base.endsWith('/')) {
+    while (base.endsWith('/')) {
       base = base.substring(0, base.length - 1);
+    }
+    // 对话用的是 /anthropic 子路径，而 search/fetch 在根路径的 /v1/tools 下，
+    // 用户按官方文档填了带 /anthropic 的地址时要去掉，否则会 404
+    if (base.endsWith('/anthropic')) {
+      base = base.substring(0, base.length - '/anthropic'.length);
     }
     this.baseUrl = base;
   }
@@ -123,12 +130,12 @@ export class DeepSeekTools {
   }
 
   private static fail(message: string): ToolResult {
-    const result: ToolResult = { success: false, error: message };
+    const result: ToolResult = { success: false, error: message, summary: message };
     return result;
   }
 
-  private static ok(data: string): ToolResult {
-    const result: ToolResult = { success: true, data: data };
+  private static ok(data: string, summary: string): ToolResult {
+    const result: ToolResult = { success: true, data: data, summary: summary };
     return result;
   }
 
@@ -184,7 +191,7 @@ export class DeepSeekTools {
 
     const rawItems: Object[] | undefined = findResultArray(root);
     if (rawItems === undefined || rawItems.length === 0) {
-      return DeepSeekTools.ok('未找到相关结果');
+      return DeepSeekTools.ok('未找到相关结果', '没有找到相关结果');
     }
 
     const sections: string[] = [];
@@ -212,9 +219,9 @@ export class DeepSeekTools {
     }
 
     if (sections.length === 0) {
-      return DeepSeekTools.ok('未找到相关结果');
+      return DeepSeekTools.ok('未找到相关结果', '没有找到相关结果');
     }
-    return DeepSeekTools.ok(sections.join('\n\n'));
+    return DeepSeekTools.ok(sections.join('\n\n'), `找到 ${sections.length} 条结果`);
   }
 
   // 抓取网页：给模型返回标题+正文，超长截断
@@ -253,7 +260,7 @@ export class DeepSeekTools {
 
     const content: string | undefined = readString(source, ['content', 'text', 'markdown', 'html', 'page_content']);
     if (content === undefined || content.trim().length === 0) {
-      return DeepSeekTools.ok('页面内容为空');
+      return DeepSeekTools.ok('页面内容为空', '页面内容为空');
     }
 
     const title: string | undefined = readString(source, ['title', 'page_title']);
@@ -263,7 +270,7 @@ export class DeepSeekTools {
     text += `URL: ${finalUrl}\n\n`;
     text += truncate(content, 8000, '\n\n[内容已截断]');
 
-    return DeepSeekTools.ok(text);
+    return DeepSeekTools.ok(text, `已抓取 ${extractHostname(finalUrl)}`);
   }
 
   // 执行工具调用，返回给模型的结果
@@ -320,16 +327,5 @@ export class DeepSeekTools {
       return '抓取网页';
     }
     return `抓取: ${extractHostname(url)}`;
-  }
-
-  // 给用户看的结果摘要
-  static getResultSummary(result: ToolResult): string {
-    if (!result.success) {
-      return `失败: ${result.error !== undefined ? result.error : '未知错误'}`;
-    }
-    if (result.data === undefined || result.data.length === 0) {
-      return '完成';
-    }
-    return truncate(result.data, 100, '...').replace(/\n/g, ' ');
   }
 }

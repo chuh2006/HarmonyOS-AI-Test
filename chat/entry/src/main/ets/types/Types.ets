@@ -35,7 +35,8 @@ export interface ToolCall {
   type: ToolType;
   arguments: string; // JSON字符串
   status: ToolStatus;
-  result?: string;
+  result?: string; // 给模型看的完整结果
+  resultSummary?: string; // 给用户看的一句话结果
   error?: string;
   startTime?: number;
   endTime?: number;
@@ -104,6 +105,8 @@ export interface ThoughtSignatureEntry {
 // OpenAI协议数据
 export interface OpenAIProtocolData {
   responseId?: string;
+  // 无状态回传时 reasoning 项必须带上自己的 id(rs_...)，不是 response id
+  reasoningItemId?: string;
   encryptedContent?: string;
 }
 
@@ -201,6 +204,7 @@ export interface DeepSeekStreamProtocolData {
 // OpenAI协议中间数据
 export interface OpenAIStreamProtocolData {
   responseId?: string;
+  reasoningItemId?: string;
   encryptedContent?: string;
 }
 
@@ -239,20 +243,8 @@ export class ChatError extends Error {
     this.provider = provider;
   }
 
-  static invalidApiKey(provider: ProviderId): ChatError {
-    return new ChatError('API Key 无效，请在设置中检查', 'INVALID_API_KEY', provider);
-  }
-
-  static rateLimited(provider: ProviderId): ChatError {
-    return new ChatError('请求过于频繁，请稍后再试', 'RATE_LIMITED', provider);
-  }
-
   static networkError(detail?: string): ChatError {
     return new ChatError(detail && detail.length > 0 ? `网络错误: ${detail}` : '网络连接失败', 'NETWORK_ERROR');
-  }
-
-  static timeout(): ChatError {
-    return new ChatError('请求超时', 'TIMEOUT');
   }
 
   static parseError(detail?: string): ChatError {
@@ -264,13 +256,21 @@ export class ChatError extends Error {
   }
 
   static httpError(statusCode: number, detail: string, provider?: ProviderId): ChatError {
+    // 保留服务端原文，便于定位是参数、额度还是模型名的问题
+    const suffix: string = detail.length > 0 ? `: ${detail}` : '';
     if (statusCode === 401 || statusCode === 403) {
-      return ChatError.invalidApiKey(provider || 'deepseek');
+      return new ChatError(`API Key 无效或无权限${suffix}`, 'INVALID_API_KEY', provider);
+    }
+    if (statusCode === 402) {
+      return new ChatError(`账户不可用或额度不足${suffix}`, 'BILLING', provider);
     }
     if (statusCode === 429) {
-      return ChatError.rateLimited(provider || 'deepseek');
+      return new ChatError(`请求过于频繁${suffix}`, 'RATE_LIMITED', provider);
     }
-    return new ChatError(`HTTP ${statusCode}: ${detail}`, 'HTTP_ERROR', provider);
+    if (statusCode === 404) {
+      return new ChatError(`接口或模型不存在${suffix}`, 'NOT_FOUND', provider);
+    }
+    return new ChatError(`HTTP ${statusCode}${suffix}`, 'HTTP_ERROR', provider);
   }
 }
 

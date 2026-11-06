@@ -10,6 +10,7 @@ import {
   TokenUsage
 } from '../types/Types';
 import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
+import { hasText, listOr, present, recordOrNull, stringField, textOr } from '../services/Json';
 import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
 // ===== Responses API 请求结构 =====
@@ -182,17 +183,17 @@ export class OpenAIProvider implements ChatProvider {
       }
 
       if (msg.role === 'assistant') {
-        // 回传加密思考内容(无状态模式必需)
+        // 回传加密思考内容(无状态模式必需)：reasoning 项要带自身的 id 与 encrypted_content
         if (msg.protocolData !== undefined && msg.protocolData.openai !== undefined) {
           const pd = msg.protocolData.openai;
-          if (pd.encryptedContent !== undefined && pd.encryptedContent.length > 0) {
+          if (hasText(pd.encryptedContent)) {
             const reasoningItem: ResponsesInputItem = {
               type: 'reasoning',
               encrypted_content: pd.encryptedContent,
               summary: []
             };
-            if (pd.responseId !== undefined) {
-              reasoningItem.id = pd.responseId;
+            if (hasText(pd.reasoningItemId)) {
+              reasoningItem.id = pd.reasoningItemId;
             }
             result.push(reasoningItem);
           }
@@ -309,8 +310,10 @@ export class OpenAIProvider implements ChatProvider {
     // 流式解析状态
     const pendingCalls: PendingFunctionCall[] = [];
     let responseId: string = '';
+    let reasoningItemId: string = '';
     let encryptedContent: string = '';
     let completed: boolean = false;
+    let sawTerminalEvent: boolean = false;
 
     const emitComplete = (): void => {
       if (completed) {
@@ -319,11 +322,17 @@ export class OpenAIProvider implements ChatProvider {
       completed = true;
       const oaData: OpenAIStreamProtocolData = {
         responseId: responseId.length > 0 ? responseId : undefined,
+        reasoningItemId: reasoningItemId.length > 0 ? reasoningItemId : undefined,
         encryptedContent: encryptedContent.length > 0 ? encryptedContent : undefined
       };
       const proto: StreamProtocolData = { openai: oaData };
       const event: StreamEvent = { type: 'complete', protocolData: proto };
       callbacks.onEvent(event);
+    };
+
+    const emitError = (message: string): void => {
+      const errEvent: StreamEvent = { type: 'error', error: message };
+      callbacks.onEvent(errEvent);
     };
 
     httpStreamRequest(
@@ -354,25 +363,28 @@ export class OpenAIProvider implements ChatProvider {
             return;
           }
 
-          if (evt.error !== undefined && evt.error.message !== undefined) {
-            const errEvent: StreamEvent = { type: 'error', error: evt.error.message };
-            callbacks.onEvent(errEvent);
+          // error 字段在正常事件里是显式 null，必须先排除
+          const topError: Record<string, Object> | null = recordOrNull(evt.error);
+          if (topError !== null) {
+            const message: string = stringField(topError, 'message');
+            emitError(message.length > 0 ? message : '服务端返回错误');
             return;
           }
 
-          if (evt.response !== undefined && evt.response.id !== undefined) {
-            responseId = evt.response.id;
+          const response: ResponsesStreamResponse | undefined = evt.response;
+          if (response !== undefined && response !== null && hasText(response.id)) {
+            responseId = textOr(response.id);
           }
 
-          const evtType: string = evt.type !== undefined ? evt.type : '';
+          const evtType: string = textOr(evt.type);
 
-          // 新输出项: function_call开始
+          // 新输出项: function_call开始 / reasoning项的id
           if (evtType === 'response.output_item.added') {
             const item: ResponsesStreamItem | undefined = evt.item;
-            if (item !== undefined && item.type === 'function_call') {
+            if (item !== undefined && item !== null && item.type === 'function_call') {
               const pending: PendingFunctionCall = {
-                callId: item.call_id !== undefined ? item.call_id : '',
-                name: item.name !== undefined ? item.name : '',
+                callId: textOr(item.call_id),
+                name: textOr(item.name),
                 argsBuffer: ''
               };
               pendingCalls.push(pending);
@@ -389,9 +401,10 @@ export class OpenAIProvider implements ChatProvider {
           }
 
           // 思考摘要增量(TASK.md: 实时展示summary)
-          if (evtType === 'response.summary_text.delta' || evtType === 'response.summary.delta') {
-            if (evt.delta !== undefined && evt.delta.length > 0) {
-              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: evt.delta };
+          if (evtType === 'response.reasoning_summary_text.delta' || evtType === 'response.summary_text.delta'
+            || evtType === 'response.reasoning_text.delta') {
+            if (hasText(evt.delta)) {
+              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: textOr(evt.delta) };
               callbacks.onEvent(thinkEvent);
             }
             return;
@@ -399,8 +412,8 @@ export class OpenAIProvider implements ChatProvider {
 
           // 正文增量(TASK.md: 实时展示content)
           if (evtType === 'response.output_text.delta' || evtType === 'response.text.delta') {
-            if (evt.delta !== undefined && evt.delta.length > 0) {
-              const contentEvent: StreamEvent = { type: 'content_delta', data: evt.delta };
+            if (hasText(evt.delta)) {
+              const contentEvent: StreamEvent = { type: 'content_delta', data: textOr(evt.delta) };
               callbacks.onEvent(contentEvent);
             }
             return;
@@ -408,7 +421,7 @@ export class OpenAIProvider implements ChatProvider {
 
           // 工具参数增量
           if (evtType === 'response.function_call_arguments.delta') {
-            if (evt.delta !== undefined && pendingCalls.length > 0) {
+            if (evt.delta !== undefined && evt.delta !== null && pendingCalls.length > 0) {
               const last: PendingFunctionCall = pendingCalls[pendingCalls.length - 1];
               last.argsBuffer += evt.delta;
               const tc: ToolCall = {
@@ -427,9 +440,7 @@ export class OpenAIProvider implements ChatProvider {
           if (evtType === 'response.function_call_arguments.done') {
             if (pendingCalls.length > 0) {
               const last: PendingFunctionCall = pendingCalls.pop() as PendingFunctionCall;
-              const finalArgs: string = evt.delta !== undefined && evt.delta.length > 0
-                ? evt.delta
-                : last.argsBuffer;
+              const finalArgs: string = hasText(evt.delta) ? textOr(evt.delta) : last.argsBuffer;
               const tc: ToolCall = {
                 id: last.callId,
                 type: last.name === 'fetch' ? 'fetch' : 'search',
@@ -442,58 +453,66 @@ export class OpenAIProvider implements ChatProvider {
             return;
           }
 
-          // 输出项完成: 捕获reasoning项的encrypted_content(工具调用后继续对话必需)
+          // 输出项完成: 捕获reasoning项的id与encrypted_content(工具调用后继续对话必需)
           if (evtType === 'response.output_item.done') {
             const item: ResponsesStreamItem | undefined = evt.item;
-            if (item !== undefined && item.type === 'reasoning') {
-              if (item.encrypted_content !== undefined && item.encrypted_content.length > 0) {
-                encryptedContent = item.encrypted_content;
+            if (item !== undefined && item !== null && item.type === 'reasoning') {
+              if (hasText(item.id)) {
+                reasoningItemId = textOr(item.id);
+              }
+              if (hasText(item.encrypted_content)) {
+                encryptedContent = textOr(item.encrypted_content);
               }
             }
             return;
           }
 
-          // 使用量
-          if (evtType === 'response.completed' || evtType === 'response.incomplete') {
-            if (evt.response !== undefined) {
-              // 从最终输出兜底提取encrypted_content
-              if (evt.response.output !== undefined) {
-                for (const item of evt.response.output) {
-                  if (item.type === 'reasoning' && item.encrypted_content !== undefined
-                    && item.encrypted_content.length > 0) {
-                    encryptedContent = item.encrypted_content;
+          // 终止事件: 使用量、错误与最终输出都在这里
+          if (evtType === 'response.completed' || evtType === 'response.incomplete'
+            || evtType === 'response.failed') {
+            sawTerminalEvent = true;
+            if (response !== undefined && response !== null) {
+              // 从最终输出兜底提取reasoning项
+              for (const item of listOr(response.output)) {
+                if (item.type === 'reasoning') {
+                  if (hasText(item.id)) {
+                    reasoningItemId = textOr(item.id);
+                  }
+                  if (hasText(item.encrypted_content)) {
+                    encryptedContent = textOr(item.encrypted_content);
                   }
                 }
               }
-              if (evt.response.usage !== undefined) {
+              if (present(response.usage)) {
+                const usageValue: ResponsesStreamUsage = response.usage as ResponsesStreamUsage;
                 const usage: TokenUsage = {
-                  inputTokens: evt.response.usage.input_tokens,
-                  outputTokens: evt.response.usage.output_tokens
+                  inputTokens: usageValue.input_tokens,
+                  outputTokens: usageValue.output_tokens
                 };
                 const usageEvent: StreamEvent = { type: 'usage', usage: usage };
                 callbacks.onEvent(usageEvent);
               }
-              if (evt.response.error !== undefined && evt.response.error.message !== undefined) {
-                const errEvent: StreamEvent = { type: 'error', error: evt.response.error.message };
-                callbacks.onEvent(errEvent);
+              const responseError: Record<string, Object> | null = recordOrNull(response.error);
+              if (responseError !== null) {
+                const message: string = stringField(responseError, 'message');
+                emitError(message.length > 0 ? message : '服务端返回错误');
                 return;
               }
+            }
+            if (evtType === 'response.failed') {
+              emitError('请求失败');
+              return;
             }
             emitComplete();
             return;
           }
-
-          if (evtType === 'response.failed') {
-            const errMsg: string = evt.response !== undefined && evt.response.error !== undefined
-              && evt.response.error.message !== undefined
-              ? evt.response.error.message as string
-              : '请求失败';
-            const errEvent: StreamEvent = { type: 'error', error: errMsg };
-            callbacks.onEvent(errEvent);
-          }
         },
 
         onComplete: () => {
+          if (!sawTerminalEvent && !completed) {
+            // 没有终止事件说明连接被提前关闭，已收到的内容仍然保留
+            emitError('响应在完成事件前中断，请重试');
+          }
           emitComplete();
           callbacks.onComplete();
         },

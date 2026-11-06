@@ -214,13 +214,20 @@ struct Index {
   InputArea() {
     Column({ space: 8 }) {
       if (this.errorText.length > 0) {
-        Row({ space: 8 }) {
+        Row({ space: 12 }) {
           Text(this.errorText)
             .fontSize(12)
             .fontColor('#FF3B30')
             .layoutWeight(1)
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
+
+          Text('重试')
+            .fontSize(12)
+            .fontColor('#007AFF')
+            .onClick(() => {
+              this.retryLast();
+            })
 
           Text('忽略')
             .fontSize(12)
@@ -302,9 +309,20 @@ struct Index {
     this.currentSession = session;
     this.currentSessionId = session.id;
     this.sessionTitle = session.title;
-    this.messages = session.messages.slice();
+    this.messages = this.visibleMessages(session.messages);
     this.modelConfig = session.modelConfig;
     this.scrollToBottom();
+  }
+
+  // 工具结果消息只作为协议上下文存在，界面上由助手消息里的工具卡片展示
+  private visibleMessages(messages: Message[]): Message[] {
+    const result: Message[] = [];
+    for (const message of messages) {
+      if (message.role === 'user' || message.role === 'assistant') {
+        result.push(message);
+      }
+    }
+    return result;
   }
 
   private scrollToBottom(): void {
@@ -324,6 +342,9 @@ struct Index {
   }
 
   private upsertMessage(message: Message): void {
+    if (message.role !== 'user' && message.role !== 'assistant') {
+      return;
+    }
     const updated: Message[] = [];
     let found: boolean = false;
     for (const item of this.messages) {
@@ -450,29 +471,15 @@ struct Index {
     });
   }
 
-  private sendMessage(): void {
+  private buildCallbacks(sessionId: string): ChatCallbacks {
     const store: Store | null = this.store;
-    const engine: ChatEngine | null = this.chatEngine;
-    const session: Session | null = this.currentSession;
-    if (store === null || engine === null || session === null) {
-      return;
-    }
-
-    const content: string = this.inputText.trim();
-    if (content.length === 0 || this.isGenerating) {
-      return;
-    }
-
-    this.inputText = '';
-    this.errorText = '';
-    this.isGenerating = true;
-    this.phaseText = '请求中...';
-
-    const sessionId: string = session.id;
     const callbacks: ChatCallbacks = {
       onMessageUpdate: (message: Message) => {
         this.upsertMessage(message);
-        this.syncPhase(engine);
+        const engine: ChatEngine | null = this.chatEngine;
+        if (engine !== null) {
+          this.syncPhase(engine);
+        }
       },
       onToolCallUpdate: (messageId: string, toolCall: ToolCall) => {
         this.updateToolCall(messageId, toolCall);
@@ -486,6 +493,9 @@ struct Index {
         this.isGenerating = false;
         this.phaseText = '';
         this.upsertMessage(message);
+        if (store === null) {
+          return;
+        }
         store.generateSessionTitle(sessionId).then(() => {
           return store.getSession(sessionId);
         }).then((updated: Session | null) => {
@@ -499,18 +509,80 @@ struct Index {
         });
       }
     };
+    return callbacks;
+  }
 
-    engine.sendMessage(sessionId, content, this.modelConfig, callbacks)
+  private sendMessage(): void {
+    const engine: ChatEngine | null = this.chatEngine;
+    const session: Session | null = this.currentSession;
+    if (this.store === null || engine === null || session === null) {
+      return;
+    }
+
+    const content: string = this.inputText.trim();
+    if (content.length === 0 || this.isGenerating) {
+      return;
+    }
+
+    this.inputText = '';
+    this.beginGeneration();
+
+    const sessionId: string = session.id;
+    engine.sendMessage(sessionId, content, this.modelConfig, this.buildCallbacks(sessionId))
       .then(() => {
-        this.isGenerating = false;
-        this.phaseText = '';
-        this.refreshSessions();
+        this.endGeneration();
       })
       .catch((error: Error) => {
-        this.isGenerating = false;
-        this.phaseText = '';
+        this.endGeneration();
         this.errorText = error.message;
       });
+  }
+
+  // 失败后重试：引擎会截掉最后一条失败的助手消息并重新生成
+  private retryLast(): void {
+    const engine: ChatEngine | null = this.chatEngine;
+    const session: Session | null = this.currentSession;
+    if (engine === null || session === null || this.isGenerating) {
+      return;
+    }
+
+    this.dropTrailingFailedMessage();
+    this.beginGeneration();
+
+    const sessionId: string = session.id;
+    engine.retryLastMessage(sessionId, this.modelConfig, this.buildCallbacks(sessionId))
+      .then(() => {
+        this.endGeneration();
+      })
+      .catch((error: Error) => {
+        this.endGeneration();
+        this.errorText = error.message;
+      });
+  }
+
+  private dropTrailingFailedMessage(): void {
+    let cutIndex: number = this.messages.length;
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === 'assistant') {
+        cutIndex = i;
+        break;
+      }
+    }
+    if (cutIndex < this.messages.length && this.messages[cutIndex].status === 'error') {
+      this.messages = this.messages.slice(0, cutIndex);
+    }
+  }
+
+  private beginGeneration(): void {
+    this.errorText = '';
+    this.isGenerating = true;
+    this.phaseText = '请求中...';
+  }
+
+  private endGeneration(): void {
+    this.isGenerating = false;
+    this.phaseText = '';
+    this.refreshSessions();
   }
 
   private syncPhase(engine: ChatEngine): void {

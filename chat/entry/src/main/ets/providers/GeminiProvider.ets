@@ -15,6 +15,7 @@ import {
   generateId
 } from '../types/Types';
 import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
+import { hasItems, hasText, listOr, numberOr, parseJsonObject, present, recordOrNull, stringField, textOr } from '../services/Json';
 import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
 // ===== Generate Content REST API 结构 =====
@@ -115,20 +116,6 @@ export interface GeminiStreamChunkJson {
   candidates?: GeminiCandidateJson[];
   usageMetadata?: GeminiUsageJson;
   error?: GeminiErrorJson;
-}
-
-// 工具参数以JSON字符串保存，回传时还原为对象
-function parseJsonObject(text: string): Record<string, Object> {
-  const empty: Record<string, Object> = {};
-  if (text.length === 0) {
-    return empty;
-  }
-  try {
-    const parsed: Object = JSON.parse(text) as Object;
-    return parsed as Record<string, Object>;
-  } catch (e) {
-    return empty;
-  }
 }
 
 export class GeminiProvider implements ChatProvider {
@@ -311,6 +298,7 @@ export class GeminiProvider implements ChatProvider {
     const savedParts: ContentPart[] = [];
     let completed: boolean = false;
     let textAccumulated: boolean = false;
+    let sawFinishReason: boolean = false;
 
     const emitComplete = (): void => {
       if (completed) {
@@ -363,33 +351,43 @@ export class GeminiProvider implements ChatProvider {
             return;
           }
 
-          if (chunk.error !== undefined && chunk.error.message !== undefined) {
-            const errEvent: StreamEvent = { type: 'error', error: chunk.error.message };
+          const errorRecord: Record<string, Object> | null = recordOrNull(chunk.error);
+          if (errorRecord !== null) {
+            const message: string = stringField(errorRecord, 'message');
+            const status: string = stringField(errorRecord, 'status');
+            const detail: string = message.length > 0 ? message : '服务端返回错误';
+            const errEvent: StreamEvent = {
+              type: 'error',
+              error: status.length > 0 ? `${detail} (${status})` : detail
+            };
             callbacks.onEvent(errEvent);
             return;
           }
 
-          if (chunk.usageMetadata !== undefined) {
+          if (present(chunk.usageMetadata)) {
+            const usageJson: GeminiUsageJson = chunk.usageMetadata as GeminiUsageJson;
             const usage: TokenUsage = {
-              inputTokens: chunk.usageMetadata.promptTokenCount,
-              outputTokens: chunk.usageMetadata.candidatesTokenCount
+              inputTokens: numberOr(usageJson.promptTokenCount),
+              outputTokens: numberOr(usageJson.candidatesTokenCount)
             };
             const usageEvent: StreamEvent = { type: 'usage', usage: usage };
             callbacks.onEvent(usageEvent);
           }
 
-          if (chunk.candidates === undefined || chunk.candidates.length === 0) {
+          if (!hasItems(chunk.candidates)) {
             return;
           }
 
-          const candidate: GeminiCandidateJson = chunk.candidates[0];
+          const candidate: GeminiCandidateJson = (chunk.candidates as GeminiCandidateJson[])[0];
 
-          if (candidate.content !== undefined && candidate.content.parts !== undefined) {
-            for (const part of candidate.content.parts) {
+          if (present(candidate.content)) {
+            const contentJson: GeminiContentJsonOut = candidate.content as GeminiContentJsonOut;
+            for (const part of listOr(contentJson.parts)) {
               // 函数调用Part(Gemini一次给出完整调用)
-              if (part.functionCall !== undefined) {
-                const fc: GeminiFunctionCallJson = part.functionCall;
-                const argsStr: string = JSON.stringify(fc.args);
+              if (present(part.functionCall)) {
+                const fc: GeminiFunctionCallJson = part.functionCall as GeminiFunctionCallJson;
+                const argsRecord: Record<string, Object> | null = recordOrNull(fc.args);
+                const argsStr: string = argsRecord !== null ? JSON.stringify(argsRecord) : '{}';
                 const tc: ToolCall = {
                   id: generateId('gemcall'),
                   type: fc.name === 'fetch' ? 'fetch' : 'search',
@@ -413,11 +411,12 @@ export class GeminiProvider implements ChatProvider {
               }
 
               // 文本/思考Part
-              if (part.text !== undefined) {
+              if (hasText(part.text)) {
+                const text: string = textOr(part.text);
                 const isThought: boolean = part.thought === true;
                 const storedPart: ContentPart = {
                   type: isThought ? 'thinking' : 'text',
-                  text: part.text,
+                  text: text,
                   thought: part.thought,
                   thoughtSignature: part.thoughtSignature
                 };
@@ -425,11 +424,11 @@ export class GeminiProvider implements ChatProvider {
 
                 if (isThought) {
                   // TASK.md: 思考摘要根据thought标记识别并实时展示
-                  const thinkEvent: StreamEvent = { type: 'thinking_delta', data: part.text };
+                  const thinkEvent: StreamEvent = { type: 'thinking_delta', data: text };
                   callbacks.onEvent(thinkEvent);
                 } else {
                   textAccumulated = true;
-                  const contentEvent: StreamEvent = { type: 'content_delta', data: part.text };
+                  const contentEvent: StreamEvent = { type: 'content_delta', data: text };
                   callbacks.onEvent(contentEvent);
                 }
               }
@@ -437,16 +436,18 @@ export class GeminiProvider implements ChatProvider {
           }
 
           // 结束: TASK.md: 摘要为空时也应正常完成请求
-          if (candidate.finishReason !== undefined && candidate.finishReason !== null) {
-            const reason: string = candidate.finishReason;
-            if (reason === 'STOP' || reason === 'MAX_TOKENS' || reason === 'TOOL_CALLS'
-              || reason === 'SAFETY' || reason === 'RECITATION' || reason === 'OTHER') {
-              emitComplete();
-            }
+          if (present(candidate.finishReason)) {
+            sawFinishReason = true;
+            emitComplete();
           }
         },
 
         onComplete: () => {
+          if (!sawFinishReason && savedParts.length === 0 && !completed) {
+            // 既没有结束原因也没有任何内容，说明这次请求没有正常返回
+            const errEvent: StreamEvent = { type: 'error', error: '响应未完成，请重试' };
+            callbacks.onEvent(errEvent);
+          }
           emitComplete();
           callbacks.onComplete();
         },
