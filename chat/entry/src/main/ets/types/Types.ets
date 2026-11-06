@@ -6,13 +6,13 @@ export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 // 消息状态
 export type MessageStatus =
-  | 'idle'        // 待处理
-  | 'thinking'    // 思考中
-  | 'tool_call'   // 工具调用中
-  | 'streaming'   // 流式输出中
-  | 'complete'    // 完成
-  | 'stopped'     // 已停止
-  | 'error';      // 错误
+  | 'idle'
+  | 'thinking'
+  | 'tool_call'
+  | 'streaming'
+  | 'complete'
+  | 'stopped'
+  | 'error';
 
 // 思考强度
 export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -43,14 +43,14 @@ export interface ToolCall {
 
 // 模型能力
 export interface ModelCapabilities {
-  supportsThinking: boolean;       // 支持思考模式
-  supportsToolCall: boolean;       // 支持工具调用
-  supportsStream: boolean;         // 支持流式输出
-  supportsDiffusion?: boolean;     // 支持扩散输出(Mercury默认功能)
-  thinkingEfforts?: ThinkingEffort[]; // 可选的思考强度
-  reasoningModes?: OpenAIReasoningMode[]; // OpenAI的reasoning modes
-  speedModes?: OpenAISpeedMode[];  // OpenAI的速度模式
-  maxTokens?: number;              // 最大token数
+  supportsThinking: boolean;
+  supportsToolCall: boolean;
+  supportsStream: boolean;
+  supportsDiffusion?: boolean; // Mercury默认功能
+  thinkingEfforts?: ThinkingEffort[];
+  reasoningModes?: OpenAIReasoningMode[];
+  speedModes?: OpenAISpeedMode[];
+  maxTokens?: number;
 }
 
 // 模型定义
@@ -73,58 +73,75 @@ export interface ModelConfig {
   maxTokens?: number;
 }
 
+// Gemini函数调用Part
+export interface GeminiFunctionCallPart {
+  name: string;
+  args: string; // JSON字符串，避免any
+}
+
+// Gemini函数响应Part
+export interface GeminiFunctionResponsePart {
+  name: string;
+  response: string; // JSON字符串，避免any
+}
+
 // 消息内容部分(用于Gemini的Parts结构)
 export interface ContentPart {
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'thought_signature';
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result';
   text?: string;
-  toolCall?: ToolCall;
-  // Gemini特有
-  functionCall?: {
-    name: string;
-    args: Record<string, any>;
-  };
-  functionResponse?: {
-    name: string;
-    response: any;
-  };
+  functionCall?: GeminiFunctionCallPart;
+  functionResponse?: GeminiFunctionResponsePart;
   thoughtSignature?: string;
-  thought?: boolean; // 是否是思考摘要
+  thought?: boolean;
+}
+
+// Gemini思考签名条目(数组形式，可JSON序列化)
+export interface ThoughtSignatureEntry {
+  index: number;
+  signature: string;
+}
+
+// OpenAI协议数据
+export interface OpenAIProtocolData {
+  responseId?: string;
+  encryptedContent?: string;
+}
+
+// Gemini协议数据
+export interface GeminiProtocolData {
+  parts?: ContentPart[];
+  thoughtSignatures?: ThoughtSignatureEntry[];
+}
+
+// DeepSeek协议数据
+export interface DeepSeekProtocolData {
+  thinkingContent?: string;
+}
+
+// Mercury协议数据
+export interface MercuryProtocolData {
+  messageId?: string;
+}
+
+// 协议特定数据(用于继续对话)
+export interface ProtocolData {
+  openai?: OpenAIProtocolData;
+  gemini?: GeminiProtocolData;
+  deepseek?: DeepSeekProtocolData;
+  mercury?: MercuryProtocolData;
 }
 
 // 消息
 export interface Message {
   id: string;
   role: MessageRole;
-  content: string;              // 主要内容文本
-  thinking?: string;            // 思考内容/摘要
+  content: string;
+  thinking?: string;
   status: MessageStatus;
-  toolCalls?: ToolCall[];       // 工具调用列表
+  toolCalls?: ToolCall[];
   timestamp: number;
   error?: string;
-  
-  // 协议特定数据(用于继续对话)
-  protocolData?: {
-    // OpenAI Responses API
-    openai?: {
-      responseId?: string;
-      encryptedContent?: string;
-      reasoning?: any;
-      output?: any[];
-    };
-    // Gemini
-    gemini?: {
-      parts?: ContentPart[];
-      thoughtSignatures?: Record<number, string>; // 使用Record而不是Map以便JSON序列化
-    };
-    // DeepSeek Anthropic API
-    deepseek?: {
-      thinkingContent?: any;    // 需要回传的思考内容
-    };
-    // Mercury
-    mercury?: {
-      messageId?: string;
-    };
-  };
+  protocolData?: ProtocolData;
 }
 
 // 会话
@@ -134,238 +151,301 @@ export interface Session {
   createdAt: number;
   updatedAt: number;
   messages: Message[];
-  modelConfig: ModelConfig;     // 记住该会话使用的模型和配置
+  modelConfig: ModelConfig;
 }
 
 // Provider设置
 export interface ProviderSettings {
   apiKey: string;
-  baseUrl?: string;             // 自定义Base URL
+  baseUrl?: string;
 }
 
 // 全局设置
 export interface AppSettings {
-  providers: Record<ProviderId, ProviderSettings>;
+  providers: ProviderSettingsMap;
   defaultProvider?: ProviderId;
   defaultModel?: string;
 }
 
+// Provider设置映射(用显式字段替代Record，避免对象字面量类型问题)
+export interface ProviderSettingsMap {
+  deepseek: ProviderSettings;
+  openai: ProviderSettings;
+  mercury: ProviderSettings;
+  gemini: ProviderSettings;
+}
+
+// Token使用量
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 // 流式事件类型
 export type StreamEventType =
-  | 'thinking_delta'    // 思考内容增量
-  | 'content_delta'     // 正文增量
-  | 'content_replace'   // 内容替换(扩散模式)
-  | 'tool_call_start'   // 工具调用开始
-  | 'tool_call_delta'   // 工具调用参数增量
-  | 'tool_call_end'     // 工具调用参数完成
-  | 'complete'          // 生成完成
-  | 'error'             // 错误
-  | 'usage';            // Token使用量
+  | 'thinking_delta'
+  | 'content_delta'
+  | 'content_replace'
+  | 'tool_call_start'
+  | 'tool_call_delta'
+  | 'tool_call_end'
+  | 'complete'
+  | 'error'
+  | 'usage';
+
+// DeepSeek协议中间数据
+export interface DeepSeekStreamProtocolData {
+  thinkingContent?: string;
+}
+
+// OpenAI协议中间数据
+export interface OpenAIStreamProtocolData {
+  responseId?: string;
+  encryptedContent?: string;
+}
+
+// Gemini协议中间数据
+export interface GeminiStreamProtocolData {
+  parts?: ContentPart[];
+  thoughtSignatures?: ThoughtSignatureEntry[];
+  thoughtSignature?: string;
+}
+
+// 流式事件协议数据联合
+export interface StreamProtocolData {
+  deepseek?: DeepSeekStreamProtocolData;
+  openai?: OpenAIStreamProtocolData;
+  gemini?: GeminiStreamProtocolData;
+}
 
 // 流式事件
 export interface StreamEvent {
   type: StreamEventType;
   data?: string;
-  toolCall?: Partial<ToolCall>;
+  toolCall?: ToolCall;
   error?: string;
-  usage?: {
-    inputTokens?: number;
-    outputTokens?: number;
-  };
-  protocolData?: any;   // 协议特定的中间数据
-}
-
-// 生成状态(用于UI显示)
-export interface GenerationState {
-  isGenerating: boolean;
-  phase: 'idle' | 'requesting' | 'thinking' | 'tool_calling' | 'answering' | 'complete' | 'error';
-  currentMessageId?: string;
-  error?: string;
+  usage?: TokenUsage;
+  protocolData?: StreamProtocolData;
 }
 
 // 错误类型
 export class ChatError extends Error {
   code: string;
   provider?: ProviderId;
-  
+
   constructor(message: string, code: string, provider?: ProviderId) {
     super(message);
     this.code = code;
     this.provider = provider;
   }
-  
+
   static invalidApiKey(provider: ProviderId): ChatError {
-    return new ChatError('API Key 无效', 'INVALID_API_KEY', provider);
+    return new ChatError('API Key 无效，请在设置中检查', 'INVALID_API_KEY', provider);
   }
-  
+
   static rateLimited(provider: ProviderId): ChatError {
     return new ChatError('请求过于频繁，请稍后再试', 'RATE_LIMITED', provider);
   }
-  
+
   static networkError(detail?: string): ChatError {
-    return new ChatError(detail || '网络连接失败', 'NETWORK_ERROR');
+    return new ChatError(detail && detail.length > 0 ? `网络错误: ${detail}` : '网络连接失败', 'NETWORK_ERROR');
   }
-  
+
   static timeout(): ChatError {
     return new ChatError('请求超时', 'TIMEOUT');
   }
-  
+
   static parseError(detail?: string): ChatError {
-    return new ChatError(detail || '响应解析失败', 'PARSE_ERROR');
+    return new ChatError(detail && detail.length > 0 ? `响应解析失败: ${detail}` : '响应解析失败', 'PARSE_ERROR');
   }
-  
+
   static stopped(): ChatError {
     return new ChatError('已停止生成', 'STOPPED');
+  }
+
+  static httpError(statusCode: number, detail: string, provider?: ProviderId): ChatError {
+    if (statusCode === 401 || statusCode === 403) {
+      return ChatError.invalidApiKey(provider || 'deepseek');
+    }
+    if (statusCode === 429) {
+      return ChatError.rateLimited(provider || 'deepseek');
+    }
+    return new ChatError(`HTTP ${statusCode}: ${detail}`, 'HTTP_ERROR', provider);
   }
 }
 
 // 内置模型列表
-export const BUILTIN_MODELS: ModelInfo[] = [
+export function getBuiltinModels(): ModelInfo[] {
+  const models: ModelInfo[] = [];
+
   // DeepSeek
-  {
-    id: 'deepseek-flash',
-    name: 'DeepSeek Flash',
+  const dsCap: ModelCapabilities = {
+    supportsThinking: true,
+    supportsToolCall: true,
+    supportsStream: true,
+    thinkingEfforts: ['none', 'low', 'high', 'max'],
+    maxTokens: 128000
+  };
+  const dsFlash: ModelInfo = {
+    id: 'deepseek-chat',
+    name: 'DeepSeek Chat',
     provider: 'deepseek',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'high', 'max'],
-      maxTokens: 114514
-    }
-  },
-  {
-    id: 'deepseek-v4-pro',
-    name: 'DeepSeek V4 Pro',
+    capabilities: dsCap
+  };
+  models.push(dsFlash);
+  const dsReasonerCap: ModelCapabilities = {
+    supportsThinking: true,
+    supportsToolCall: true,
+    supportsStream: true,
+    thinkingEfforts: ['none', 'low', 'high', 'max'],
+    maxTokens: 128000
+  };
+  const dsReasoner: ModelInfo = {
+    id: 'deepseek-reasoner',
+    name: 'DeepSeek Reasoner',
     provider: 'deepseek',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'high', 'max'],
-      maxTokens: 114514
-    }
-  },
+    capabilities: dsReasonerCap
+  };
+  models.push(dsReasoner);
+
   // OpenAI
-  {
-    id: 'gpt-6-astra',
-    name: 'GPT-6 Astra',
-    provider: 'openai',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      reasoningModes: ['standard', 'pro'],
-      speedModes: ['normal', 'fast', 'ultrafast'],
-      maxTokens: 32768
-    }
-  },
-  {
-    id: 'gpt-6.1-sol',
-    name: 'GPT-6.1 Sol',
-    provider: 'openai',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      reasoningModes: ['standard', 'pro'],
-      speedModes: ['normal', 'fast', 'ultrafast'],
-      maxTokens: 32768
-    }
-  },
-  {
-    id: 'gpt-6.1-terra',
-    name: 'GPT-6.1 Terra',
-    provider: 'openai',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      reasoningModes: ['standard', 'pro'],
-      speedModes: ['normal', 'fast', 'ultrafast'],
-      maxTokens: 32768
-    }
-  },
-  {
-    id: 'gpt-6-luna',
-    name: 'GPT-6 Luna',
-    provider: 'openai',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-      reasoningModes: ['standard', 'pro'],
-      speedModes: ['normal', 'fast'],
-      maxTokens: 32768
-    }
-  },
+  const gptCap: ModelCapabilities = {
+    supportsThinking: true,
+    supportsToolCall: true,
+    supportsStream: true,
+    thinkingEfforts: ['none', 'low', 'medium', 'high', 'max'],
+    reasoningModes: ['standard', 'pro'],
+    speedModes: ['normal', 'fast', 'ultrafast'],
+    maxTokens: 128000
+  };
+  const gpt1: ModelInfo = { id: 'gpt-5', name: 'GPT-5', provider: 'openai', capabilities: gptCap };
+  models.push(gpt1);
+  const gpt2: ModelInfo = { id: 'gpt-5-mini', name: 'GPT-5 Mini', provider: 'openai', capabilities: gptCap };
+  models.push(gpt2);
+
   // Mercury
-  {
-    id: 'mercury-3',
-    name: 'Mercury 3',
+  const mercuryCap: ModelCapabilities = {
+    supportsThinking: true,
+    supportsToolCall: true,
+    supportsStream: true,
+    supportsDiffusion: true,
+    thinkingEfforts: ['none', 'low', 'medium', 'high'],
+    maxTokens: 65536
+  };
+  const mercury: ModelInfo = {
+    id: 'mercury-coder',
+    name: 'Mercury Coder',
     provider: 'mercury',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      supportsDiffusion: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high'],
-      maxTokens: 8192
-    }
-  },
+    capabilities: mercuryCap
+  };
+  models.push(mercury);
+
   // Gemini
-  {
-    id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash',
+  const geminiCap: ModelCapabilities = {
+    supportsThinking: true,
+    supportsToolCall: true,
+    supportsStream: true,
+    thinkingEfforts: ['none', 'low', 'medium', 'high'],
+    maxTokens: 65536
+  };
+  const gemini1: ModelInfo = {
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
     provider: 'gemini',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high'],
-      maxTokens: 8192
-    }
-  },
-  {
-    id: 'gemini-4-argon',
-    name: 'Gemini 4 Argon',
+    capabilities: geminiCap
+  };
+  models.push(gemini1);
+  const gemini2: ModelInfo = {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
     provider: 'gemini',
-    capabilities: {
-      supportsThinking: true,
-      supportsToolCall: true,
-      supportsStream: true,
-      thinkingEfforts: ['none', 'low', 'medium', 'high'],
-      maxTokens: 8192
-    }
-  }
-];
+    capabilities: geminiCap
+  };
+  models.push(gemini2);
+
+  return models;
+}
 
 // 获取模型信息
 export function getModelInfo(providerId: ProviderId, modelId: string): ModelInfo | undefined {
-  return BUILTIN_MODELS.find(m => m.provider === providerId && m.id === modelId);
+  const models = getBuiltinModels();
+  for (const m of models) {
+    if (m.provider === providerId && m.id === modelId) {
+      return m;
+    }
+  }
+  return undefined;
 }
 
 // 获取服务商的所有模型
 export function getProviderModels(providerId: ProviderId): ModelInfo[] {
-  return BUILTIN_MODELS.filter(m => m.provider === providerId);
+  const models = getBuiltinModels();
+  const result: ModelInfo[] = [];
+  for (const m of models) {
+    if (m.provider === providerId) {
+      result.push(m);
+    }
+  }
+  return result;
 }
 
 // 服务商显示名称
-export const PROVIDER_NAMES: Record<ProviderId, string> = {
-  deepseek: 'DeepSeek',
-  openai: 'OpenAI GPT',
-  mercury: 'Inception Mercury',
-  gemini: 'Google Gemini'
-};
+export function getProviderName(id: ProviderId): string {
+  if (id === 'deepseek') {
+    return 'DeepSeek';
+  }
+  if (id === 'openai') {
+    return 'OpenAI GPT';
+  }
+  if (id === 'mercury') {
+    return 'Inception Mercury';
+  }
+  return 'Google Gemini';
+}
 
 // 默认Base URL
-export const DEFAULT_BASE_URLS: Record<ProviderId, string> = {
-  deepseek: 'https://api.deepseek.com',
-  openai: 'https://api.openai.com',
-  mercury: 'https://api.inceptionlabs.ai',
-  gemini: 'https://generativelanguage.googleapis.com'
-};
+export function getDefaultBaseUrl(id: ProviderId): string {
+  if (id === 'deepseek') {
+    return 'https://api.deepseek.com';
+  }
+  if (id === 'openai') {
+    return 'https://api.openai.com';
+  }
+  if (id === 'mercury') {
+    return 'https://api.inceptionlabs.ai';
+  }
+  return 'https://generativelanguage.googleapis.com';
+}
+
+// 创建默认设置
+export function createDefaultSettings(): AppSettings {
+  const ds: ProviderSettings = { apiKey: '' };
+  const oa: ProviderSettings = { apiKey: '' };
+  const me: ProviderSettings = { apiKey: '' };
+  const ge: ProviderSettings = { apiKey: '' };
+  const providers: ProviderSettingsMap = {
+    deepseek: ds,
+    openai: oa,
+    mercury: me,
+    gemini: ge
+  };
+  const settings: AppSettings = { providers: providers };
+  return settings;
+}
+
+// 创建默认模型配置
+export function createDefaultModelConfig(): ModelConfig {
+  const config: ModelConfig = {
+    providerId: 'deepseek',
+    modelId: 'deepseek-chat',
+    thinkingEnabled: false,
+    thinkingEffort: 'none',
+    diffusionEnabled: true
+  };
+  return config;
+}
+
+// 生成唯一ID
+export function generateId(prefix: string): string {
+  return `${prefix}_${Date.now()}_${Math.floor(Math.random() * 1000000)}`;
+}
