@@ -1,3 +1,4 @@
+import { httpStreamRequest } from '../services/HttpStream';
 import {
   Message,
   ModelConfig,
@@ -7,7 +8,7 @@ import {
   ChatError,
   ContentPart
 } from '../types/Types';
-import http from '@ohos.net.http';
+import { StreamChatCallbacks } from './DeepSeekProvider';
 
 // Gemini Generate Content API 请求
 interface GeminiRequest {
@@ -87,7 +88,6 @@ export class GeminiProvider {
     
     for (const msg of messages) {
       if (msg.role === 'system') {
-        // Gemini不支持system消息，跳过
         continue;
       }
       
@@ -213,11 +213,12 @@ export class GeminiProvider {
   }
   
   // 流式请求
-  async *streamChat(
+  streamChat(
     messages: Message[],
     config: ModelConfig,
+    callbacks: StreamChatCallbacks,
     abortSignal?: { aborted: boolean }
-  ): AsyncGenerator<StreamEvent> {
+  ): void {
     const url = `${this.baseUrl}/v1beta/models/${config.modelId}:streamGenerateContent?alt=sse`;
     
     const requestBody: GeminiRequest = {
@@ -243,212 +244,167 @@ export class GeminiProvider {
       }
     }
     
-    const httpRequest = http.createHttp();
+    // 保存所有parts及其签名
+    const allParts: ContentPart[] = [];
+    const thoughtSignatures: Record<number, string> = {};
+    let partIndex = 0;
     
-    try {
-      const response = await httpRequest.request(
+    httpStreamRequest(
+      {
         url,
-        {
-          method: http.RequestMethod.POST,
-          header: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': this.settings.apiKey
-          },
-          extraData: JSON.stringify(requestBody),
-          readTimeout: 300000,
-          connectTimeout: 30000,
-          expectDataType: http.HttpDataType.STRING
-        }
-      );
-      
-      if (abortSignal?.aborted) {
-        throw ChatError.stopped();
-      }
-      
-      if (response.responseCode !== 200) {
-        const errorBody = response.result as string;
-        this.handleHttpError(response.responseCode, errorBody);
-      }
-      
-      // 解析SSE流
-      const fullResponse = response.result as string;
-      const lines = fullResponse.split('\n');
-      
-      // 保存所有parts及其签名
-      const allParts: ContentPart[] = [];
-      const thoughtSignatures: Map<number, string> = new Map();
-      let currentToolCall: Partial<ToolCall> | null = null;
-      let partIndex = 0;
-      
-      for (const line of lines) {
-        if (abortSignal?.aborted) {
-          throw ChatError.stopped();
-        }
-        
-        if (!line.startsWith('data: ')) continue;
-        
-        const data = line.substring(6).trim();
-        if (data === '[DONE]') break;
-        
-        try {
-          const chunk: GeminiStreamChunk = JSON.parse(data);
-          
-          // 处理错误
-          if (chunk.error) {
-            yield {
-              type: 'error',
-              error: chunk.error.message
-            };
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.settings.apiKey
+        },
+        body: JSON.stringify(requestBody),
+        timeout: 300000
+      },
+      {
+        onData: (data: string) => {
+          if (abortSignal?.aborted) {
             return;
           }
           
-          if (chunk.candidates && chunk.candidates.length > 0) {
-            const candidate = chunk.candidates[0];
+          if (data === '[DONE]') {
+            return;
+          }
+          
+          try {
+            const chunk: GeminiStreamChunk = JSON.parse(data);
             
-            // 处理parts
-            if (candidate.content?.parts) {
-              for (const part of candidate.content.parts) {
-                // 保存思考签名
-                if (part.thoughtSignature) {
-                  thoughtSignatures.set(partIndex, part.thoughtSignature);
-                }
-                
-                // 处理函数调用
-                if (part.functionCall) {
-                  currentToolCall = {
-                    id: `call_${Date.now()}_${partIndex}`,
-                    type: part.functionCall.name as 'search' | 'fetch',
-                    arguments: JSON.stringify(part.functionCall.args),
-                    status: 'pending'
-                  };
-                  
-                  // 保存为ContentPart
-                  allParts.push({
-                    type: 'tool_call',
-                    functionCall: part.functionCall,
-                    thoughtSignature: part.thoughtSignature
-                  });
-                  
-                  yield {
-                    type: 'tool_call_end',
-                    toolCall: currentToolCall
-                  };
-                  
-                  currentToolCall = null;
-                  partIndex++;
-                  continue;
-                }
-                
-                // 处理函数响应
-                if (part.functionResponse) {
-                  allParts.push({
-                    type: 'tool_result',
-                    functionResponse: part.functionResponse
-                  });
-                  partIndex++;
-                  continue;
-                }
-                
-                // 处理文本和思考
-                if (part.text !== undefined) {
-                  const contentPart: ContentPart = {
-                    type: part.thought ? 'thinking' : 'text',
-                    text: part.text,
-                    thought: part.thought,
-                    thoughtSignature: part.thoughtSignature
-                  };
-                  allParts.push(contentPart);
-                  
-                  if (part.thought) {
-                    yield {
-                      type: 'thinking_delta',
-                      data: part.text,
-                      protocolData: { thoughtSignature: part.thoughtSignature }
-                    };
-                  } else {
-                    yield {
-                      type: 'content_delta',
-                      data: part.text
-                    };
-                  }
-                  
-                  partIndex++;
-                }
-              }
-            }
-            
-            // 使用量信息
-            if (chunk.usageMetadata) {
-              yield {
-                type: 'usage',
-                usage: {
-                  inputTokens: chunk.usageMetadata.promptTokenCount,
-                  outputTokens: chunk.usageMetadata.candidatesTokenCount
-                }
-              };
-            }
-            
-            // 完成
-            if (candidate.finishReason === 'STOP' || candidate.finishReason === 'MAX_TOKENS') {
-              yield {
-                type: 'complete',
-                protocolData: {
-                  parts: allParts,
-                  thoughtSignatures
-                }
-              };
+            // 处理错误
+            if (chunk.error) {
+              callbacks.onEvent({
+                type: 'error',
+                error: chunk.error.message
+              });
               return;
             }
+            
+            if (chunk.candidates && chunk.candidates.length > 0) {
+              const candidate = chunk.candidates[0];
+              
+              // 处理parts
+              if (candidate.content?.parts) {
+                for (const part of candidate.content.parts) {
+                  // 保存思考签名
+                  if (part.thoughtSignature) {
+                    thoughtSignatures[partIndex] = part.thoughtSignature;
+                  }
+                  
+                  // 处理函数调用
+                  if (part.functionCall) {
+                    const toolCall: ToolCall = {
+                      id: `call_${Date.now()}_${partIndex}`,
+                      type: part.functionCall.name as 'search' | 'fetch',
+                      arguments: JSON.stringify(part.functionCall.args),
+                      status: 'pending'
+                    };
+                    
+                    // 保存为ContentPart
+                    allParts.push({
+                      type: 'tool_call',
+                      functionCall: part.functionCall,
+                      thoughtSignature: part.thoughtSignature
+                    });
+                    
+                    callbacks.onEvent({
+                      type: 'tool_call_end',
+                      toolCall
+                    });
+                    
+                    partIndex++;
+                    continue;
+                  }
+                  
+                  // 处理函数响应
+                  if (part.functionResponse) {
+                    allParts.push({
+                      type: 'tool_result',
+                      functionResponse: part.functionResponse
+                    });
+                    partIndex++;
+                    continue;
+                  }
+                  
+                  // 处理文本和思考
+                  if (part.text !== undefined) {
+                    const contentPart: ContentPart = {
+                      type: part.thought ? 'thinking' : 'text',
+                      text: part.text,
+                      thought: part.thought,
+                      thoughtSignature: part.thoughtSignature
+                    };
+                    allParts.push(contentPart);
+                    
+                    if (part.thought) {
+                      callbacks.onEvent({
+                        type: 'thinking_delta',
+                        data: part.text,
+                        protocolData: { thoughtSignature: part.thoughtSignature }
+                      });
+                    } else {
+                      callbacks.onEvent({
+                        type: 'content_delta',
+                        data: part.text
+                      });
+                    }
+                    
+                    partIndex++;
+                  }
+                }
+              }
+              
+              // 使用量信息
+              if (chunk.usageMetadata) {
+                callbacks.onEvent({
+                  type: 'usage',
+                  usage: {
+                    inputTokens: chunk.usageMetadata.promptTokenCount,
+                    outputTokens: chunk.usageMetadata.candidatesTokenCount
+                  }
+                });
+              }
+              
+              // 完成
+              if (candidate.finishReason === 'STOP' || candidate.finishReason === 'MAX_TOKENS') {
+                callbacks.onEvent({
+                  type: 'complete',
+                  protocolData: {
+                    parts: allParts,
+                    thoughtSignatures
+                  }
+                });
+              }
+            }
+          } catch (e) {
+            console.error('Gemini stream parse error:', e);
           }
-        } catch (e) {
-          console.error('Gemini stream parse error:', e);
+        },
+        
+        onComplete: () => {
+          callbacks.onEvent({
+            type: 'complete',
+            protocolData: {
+              parts: allParts,
+              thoughtSignatures
+            }
+          });
+          callbacks.onComplete();
+        },
+        
+        onError: (error: Error) => {
+          callbacks.onError(error);
         }
-      }
-      
-      yield {
-        type: 'complete',
-        protocolData: {
-          parts: allParts,
-          thoughtSignatures
-        }
-      };
-      
-    } catch (error) {
+      },
+      abortSignal
+    ).catch((error: Error) => {
       if (error instanceof ChatError) {
-        yield { type: 'error', error: error.message };
-        throw error;
+        callbacks.onError(error);
+      } else {
+        callbacks.onError(ChatError.networkError(error.message));
       }
-      const chatError = ChatError.networkError((error as Error).message);
-      yield { type: 'error', error: chatError.message };
-      throw chatError;
-    } finally {
-      httpRequest.destroy();
-    }
-  }
-  
-  // 处理HTTP错误
-  private handleHttpError(statusCode: number, body: string): never {
-    let errorMessage = `HTTP ${statusCode}`;
-    
-    try {
-      const errorJson = JSON.parse(body);
-      if (errorJson.error?.message) {
-        errorMessage = errorJson.error.message;
-      }
-    } catch {
-      if (body) {
-        errorMessage = body.substring(0, 200);
-      }
-    }
-    
-    if (statusCode === 400 && errorMessage.includes('API key')) {
-      throw ChatError.invalidApiKey('gemini');
-    } else if (statusCode === 401 || statusCode === 403) {
-      throw ChatError.invalidApiKey('gemini');
-    } else if (statusCode === 429) {
-      throw ChatError.rateLimited('gemini');
-    } else {
-      throw new ChatError(errorMessage, 'HTTP_ERROR', 'gemini');
-    }
+    });
   }
 }

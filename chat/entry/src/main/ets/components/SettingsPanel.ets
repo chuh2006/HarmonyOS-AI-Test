@@ -234,7 +234,7 @@ export struct SettingsPanel {
               .fontSize(14)
               .fontColor('#666666')
             
-            Text('实验性功能，实时修订文本')
+            Text('实时展示文本修订过程')
               .fontSize(11)
               .fontColor('#999999')
           }

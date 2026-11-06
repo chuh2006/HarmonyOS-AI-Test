@@ -1,3 +1,4 @@
+import { httpStreamRequest } from '../services/HttpStream';
 import {
   Message,
   ModelConfig,
@@ -6,7 +7,7 @@ import {
   ProviderSettings,
   ChatError
 } from '../types/Types';
-import http from '@ohos.net.http';
+import { StreamChatCallbacks } from './DeepSeekProvider';
 
 // Mercury Chat Completions API 请求
 interface MercuryRequest {
@@ -185,13 +186,15 @@ export class MercuryProvider {
   }
   
   // 流式请求
-  async *streamChat(
+  streamChat(
     messages: Message[],
     config: ModelConfig,
+    callbacks: StreamChatCallbacks,
     abortSignal?: { aborted: boolean }
-  ): AsyncGenerator<StreamEvent> {
+  ): void {
     const url = `${this.baseUrl}/v1/chat/completions`;
-    const useDiffusion = config.diffusionEnabled !== false; // 默认开启扩散
+    // 扩散模式默认开启(不是实验性功能)
+    const useDiffusion = config.diffusionEnabled !== false;
     
     const requestBody: MercuryRequest = {
       model: config.modelId,
@@ -201,7 +204,7 @@ export class MercuryProvider {
       tools: this.getToolDefinitions()
     };
     
-    // 扩散模式
+    // 扩散模式(默认功能)
     if (useDiffusion) {
       requestBody.diffusing = true;
     }
@@ -211,220 +214,177 @@ export class MercuryProvider {
       requestBody.reasoning_effort = config.thinkingEffort as 'low' | 'medium' | 'high';
     }
     
-    const httpRequest = http.createHttp();
+    // 工具调用状态跟踪
+    const toolCalls: Map<number, Partial<ToolCall>> = new Map();
     
-    try {
-      const response = await httpRequest.request(
+    httpStreamRequest(
+      {
         url,
-        {
-          method: http.RequestMethod.POST,
-          header: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.settings.apiKey}`
-          },
-          extraData: JSON.stringify(requestBody),
-          readTimeout: 300000,
-          connectTimeout: 30000,
-          expectDataType: http.HttpDataType.STRING
-        }
-      );
-      
-      if (abortSignal?.aborted) {
-        throw ChatError.stopped();
-      }
-      
-      if (response.responseCode !== 200) {
-        const errorBody = response.result as string;
-        this.handleHttpError(response.responseCode, errorBody);
-      }
-      
-      // 解析SSE流
-      const fullResponse = response.result as string;
-      const lines = fullResponse.split('\n');
-      
-      // 工具调用状态跟踪
-      const toolCalls: Map<number, Partial<ToolCall>> = new Map();
-      
-      for (const line of lines) {
-        if (abortSignal?.aborted) {
-          throw ChatError.stopped();
-        }
-        
-        if (!line.startsWith('data: ')) continue;
-        
-        const data = line.substring(6).trim();
-        if (data === '[DONE]') break;
-        
-        try {
-          if (useDiffusion) {
-            // 扩散模式处理
-            const chunk: MercuryDiffusionChunk = JSON.parse(data);
-            
-            if (chunk.choices && chunk.choices.length > 0) {
-              const choice = chunk.choices[0];
-              const content = choice.message?.content || '';
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.settings.apiKey}`
+        },
+        body: JSON.stringify(requestBody),
+        timeout: 300000
+      },
+      {
+        onData: (data: string) => {
+          if (abortSignal?.aborted) {
+            return;
+          }
+          
+          if (data === '[DONE]') {
+            return;
+          }
+          
+          try {
+            if (useDiffusion) {
+              // 扩散模式处理(全量帧)
+              const chunk: MercuryDiffusionChunk = JSON.parse(data);
               
-              // 扩散模式：每次都是完整内容，使用content_replace
-              if (content) {
-                yield {
-                  type: 'content_replace',
-                  data: content
-                };
-              }
-              
-              // 处理工具调用
-              if (choice.message?.tool_calls) {
-                for (const tc of choice.message.tool_calls) {
-                  const existingCall = toolCalls.get(0) || {
-                    id: tc.id,
-                    type: tc.function.name as 'search' | 'fetch',
-                    arguments: '',
-                    status: 'pending' as const
-                  };
-                  
-                  existingCall.arguments = tc.function.arguments;
-                  toolCalls.set(0, existingCall);
-                  
-                  yield {
-                    type: 'tool_call_end',
-                    toolCall: existingCall
-                  };
+              if (chunk.choices && chunk.choices.length > 0) {
+                const choice = chunk.choices[0];
+                const content = choice.message?.content || '';
+                
+                // 扩散模式：每次都是完整内容，使用content_replace
+                if (content) {
+                  callbacks.onEvent({
+                    type: 'content_replace',
+                    data: content
+                  });
                 }
-              }
-              
-              // 完成
-              if (choice.finish_reason === 'stop' || choice.finish_reason === 'tool_calls') {
-                yield { type: 'complete' };
-                return;
-              }
-            }
-          } else {
-            // 普通流式模式处理
-            const chunk: MercuryStreamChunk = JSON.parse(data);
-            
-            if (chunk.choices && chunk.choices.length > 0) {
-              const choice = chunk.choices[0];
-              const delta = choice.delta;
-              
-              // 处理文本增量
-              if (delta?.content) {
-                yield {
-                  type: 'content_delta',
-                  data: delta.content
-                };
-              }
-              
-              // 处理工具调用
-              if (delta?.tool_calls) {
-                for (const tc of delta.tool_calls) {
-                  const idx = tc.index;
-                  let existingCall = toolCalls.get(idx);
-                  
-                  if (!existingCall) {
-                    existingCall = {
-                      id: tc.id || '',
-                      type: (tc.function?.name || '') as 'search' | 'fetch',
+                
+                // 处理工具调用
+                if (choice.message?.tool_calls) {
+                  for (const tc of choice.message.tool_calls) {
+                    const existingCall = toolCalls.get(0) || {
+                      id: tc.id,
+                      type: tc.function.name as 'search' | 'fetch',
                       arguments: '',
-                      status: 'pending'
+                      status: 'pending' as const
                     };
-                    toolCalls.set(idx, existingCall);
                     
-                    yield {
-                      type: 'tool_call_start',
-                      toolCall: existingCall
-                    };
-                  }
-                  
-                  if (tc.function?.arguments) {
-                    existingCall.arguments = (existingCall.arguments || '') + tc.function.arguments;
+                    existingCall.arguments = tc.function.arguments;
+                    toolCalls.set(0, existingCall);
                     
-                    yield {
-                      type: 'tool_call_delta',
-                      toolCall: existingCall
-                    };
-                  }
-                }
-              }
-              
-              // 使用量信息
-              if (chunk.usage) {
-                yield {
-                  type: 'usage',
-                  usage: {
-                    inputTokens: chunk.usage.prompt_tokens,
-                    outputTokens: chunk.usage.completion_tokens
-                  }
-                };
-              }
-              
-              // 完成
-              if (choice.finish_reason) {
-                // 完成所有未结束的工具调用
-                for (const [, tc] of toolCalls) {
-                  if (tc.status === 'pending') {
-                    yield {
+                    callbacks.onEvent({
                       type: 'tool_call_end',
-                      toolCall: tc
-                    };
+                      toolCall: existingCall
+                    });
                   }
                 }
                 
-                yield { type: 'complete' };
-                return;
+                // 完成
+                if (choice.finish_reason === 'stop' || choice.finish_reason === 'tool_calls') {
+                  callbacks.onEvent({ type: 'complete' });
+                }
+              }
+            } else {
+              // 普通流式模式处理(增量)
+              const chunk: MercuryStreamChunk = JSON.parse(data);
+              
+              if (chunk.choices && chunk.choices.length > 0) {
+                const choice = chunk.choices[0];
+                const delta = choice.delta;
+                
+                // 处理文本增量
+                if (delta?.content) {
+                  callbacks.onEvent({
+                    type: 'content_delta',
+                    data: delta.content
+                  });
+                }
+                
+                // 处理工具调用
+                if (delta?.tool_calls) {
+                  for (const tc of delta.tool_calls) {
+                    const idx = tc.index;
+                    let existingCall = toolCalls.get(idx);
+                    
+                    if (!existingCall) {
+                      existingCall = {
+                        id: tc.id || '',
+                        type: (tc.function?.name || '') as 'search' | 'fetch',
+                        arguments: '',
+                        status: 'pending'
+                      };
+                      toolCalls.set(idx, existingCall);
+                      
+                      callbacks.onEvent({
+                        type: 'tool_call_start',
+                        toolCall: existingCall
+                      });
+                    }
+                    
+                    if (tc.function?.arguments) {
+                      existingCall.arguments = (existingCall.arguments || '') + tc.function.arguments;
+                      
+                      callbacks.onEvent({
+                        type: 'tool_call_delta',
+                        toolCall: existingCall
+                      });
+                    }
+                  }
+                }
+                
+                // 使用量信息
+                if (chunk.usage) {
+                  callbacks.onEvent({
+                    type: 'usage',
+                    usage: {
+                      inputTokens: chunk.usage.prompt_tokens,
+                      outputTokens: chunk.usage.completion_tokens
+                    }
+                  });
+                }
+                
+                // 完成
+                if (choice.finish_reason) {
+                  // 完成所有未结束的工具调用
+                  for (const [, tc] of toolCalls) {
+                    if (tc.status === 'pending') {
+                      callbacks.onEvent({
+                        type: 'tool_call_end',
+                        toolCall: tc
+                      });
+                    }
+                  }
+                  
+                  callbacks.onEvent({ type: 'complete' });
+                }
               }
             }
+          } catch (e) {
+            console.error('Mercury stream parse error:', e);
           }
-        } catch (e) {
-          console.error('Mercury stream parse error:', e);
+        },
+        
+        onComplete: () => {
+          // 完成所有未结束的工具调用
+          for (const [, tc] of toolCalls) {
+            if (tc.status === 'pending') {
+              callbacks.onEvent({
+                type: 'tool_call_end',
+                toolCall: tc
+              });
+            }
+          }
+          
+          callbacks.onComplete();
+        },
+        
+        onError: (error: Error) => {
+          callbacks.onError(error);
         }
-      }
-      
-      // 完成所有未结束的工具调用
-      for (const [, tc] of toolCalls) {
-        if (tc.status === 'pending') {
-          yield {
-            type: 'tool_call_end',
-            toolCall: tc
-          };
-        }
-      }
-      
-      yield { type: 'complete' };
-      
-    } catch (error) {
+      },
+      abortSignal
+    ).catch((error: Error) => {
       if (error instanceof ChatError) {
-        yield { type: 'error', error: error.message };
-        throw error;
+        callbacks.onError(error);
+      } else {
+        callbacks.onError(ChatError.networkError(error.message));
       }
-      const chatError = ChatError.networkError((error as Error).message);
-      yield { type: 'error', error: chatError.message };
-      throw chatError;
-    } finally {
-      httpRequest.destroy();
-    }
-  }
-  
-  // 处理HTTP错误
-  private handleHttpError(statusCode: number, body: string): never {
-    let errorMessage = `HTTP ${statusCode}`;
-    
-    try {
-      const errorJson = JSON.parse(body);
-      if (errorJson.error?.message) {
-        errorMessage = errorJson.error.message;
-      }
-    } catch {
-      if (body) {
-        errorMessage = body.substring(0, 200);
-      }
-    }
-    
-    if (statusCode === 401 || statusCode === 403) {
-      throw ChatError.invalidApiKey('mercury');
-    } else if (statusCode === 429) {
-      throw ChatError.rateLimited('mercury');
-    } else {
-      throw new ChatError(errorMessage, 'HTTP_ERROR', 'mercury');
-    }
+    });
   }
 }

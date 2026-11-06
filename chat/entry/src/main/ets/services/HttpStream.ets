@@ -1,4 +1,5 @@
 import http from '@ohos.net.http';
+import util from '@ohos.util';
 import { ChatError } from '../types/Types';
 
 // HTTP请求选项
@@ -120,109 +121,145 @@ export class SseParser {
   }
 }
 
-// HTTP流式请求回调
+// 流式HTTP请求回调
 export interface StreamCallbacks {
   onData: (chunk: string) => void;
   onComplete?: () => void;
   onError?: (error: Error) => void;
 }
 
-// 流式HTTP请求(用于SSE)
-export async function httpStreamRequest(
+// 真正的流式HTTP请求(使用HarmonyOS的requestInStream)
+export function httpStreamRequest(
   options: HttpRequestOptions,
   callbacks: StreamCallbacks,
   abortSignal?: { aborted: boolean }
 ): Promise<void> {
-  const httpRequest = http.createHttp();
-  
-  try {
-    // 检查是否已中止
+  return new Promise((resolve, reject) => {
+    const httpRequest = http.createHttp();
+    const parser = new SseParser();
+    const decoder = util.TextDecoder.create('utf-8', { ignoreBOM: true });
+    
+    let hasError = false;
+    let completed = false;
+    
+    // 检查中止
     if (abortSignal?.aborted) {
-      throw ChatError.stopped();
+      httpRequest.destroy();
+      reject(ChatError.stopped());
+      return;
     }
     
-    const response = await httpRequest.request(
+    // 监听数据接收
+    httpRequest.on('dataReceive', (data: ArrayBuffer) => {
+      if (abortSignal?.aborted || hasError) {
+        return;
+      }
+      
+      try {
+        // 使用流式解码处理UTF-8跨分片
+        const text = decoder.decodeToString(new Uint8Array(data), { stream: true });
+        
+        // 解析SSE事件
+        const events = parser.parse(text);
+        
+        for (const event of events) {
+          if (abortSignal?.aborted) {
+            return;
+          }
+          callbacks.onData(event.data);
+        }
+      } catch (error) {
+        hasError = true;
+        const chatError = ChatError.parseError((error as Error).message);
+        callbacks.onError?.(chatError);
+        httpRequest.destroy();
+        reject(chatError);
+      }
+    });
+    
+    // 监听数据接收完成
+    httpRequest.on('dataEnd', () => {
+      if (hasError || completed) {
+        return;
+      }
+      
+      completed = true;
+      
+      try {
+        // 处理缓冲区剩余内容
+        const remaining = parser.flush();
+        if (remaining && remaining.data) {
+          callbacks.onData(remaining.data);
+        }
+        
+        callbacks.onComplete?.();
+        httpRequest.destroy();
+        resolve();
+      } catch (error) {
+        httpRequest.destroy();
+        reject(error);
+      }
+    });
+    
+    // 监听错误
+    httpRequest.on('error', (error: Error) => {
+      if (hasError || completed) {
+        return;
+      }
+      
+      hasError = true;
+      const chatError = ChatError.networkError(error.message);
+      callbacks.onError?.(chatError);
+      httpRequest.destroy();
+      reject(chatError);
+    });
+    
+    // 发起流式请求
+    httpRequest.requestInStream(
       options.url,
       {
         method: options.method === 'POST' ? http.RequestMethod.POST :
                 options.method === 'PUT' ? http.RequestMethod.PUT :
                 options.method === 'DELETE' ? http.RequestMethod.DELETE :
                 http.RequestMethod.GET,
-        header: options.headers || {},
+        header: {
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          ...(options.headers || {})
+        },
         extraData: options.body,
         readTimeout: options.timeout || 300000,
-        connectTimeout: 30000,
-        expectDataType: http.HttpDataType.STRING
+        connectTimeout: 30000
       }
-    );
-    
-    if (abortSignal?.aborted) {
-      throw ChatError.stopped();
-    }
-    
-    // 检查HTTP状态码
-    if (response.responseCode !== 200) {
-      const errorBody = response.result as string;
-      let errorMessage = `HTTP ${response.responseCode}`;
-      
-      try {
-        const errorJson = JSON.parse(errorBody);
-        if (errorJson.error?.message) {
-          errorMessage = errorJson.error.message;
+    ).then((responseCode: number) => {
+      // 检查HTTP状态码
+      if (responseCode !== 200) {
+        hasError = true;
+        
+        // 特殊处理常见错误
+        let error: ChatError;
+        if (responseCode === 401 || responseCode === 403) {
+          error = ChatError.invalidApiKey('deepseek');
+        } else if (responseCode === 429) {
+          error = ChatError.rateLimited('deepseek');
+        } else {
+          error = new ChatError(`HTTP ${responseCode}`, 'HTTP_ERROR');
         }
-      } catch {
-        if (errorBody) {
-          errorMessage = errorBody.substring(0, 200);
-        }
+        
+        callbacks.onError?.(error);
+        httpRequest.destroy();
+        reject(error);
       }
-      
-      // 特殊处理常见错误
-      if (response.responseCode === 401 || response.responseCode === 403) {
-        throw ChatError.invalidApiKey('deepseek'); // 会在provider中被覆盖
-      } else if (response.responseCode === 429) {
-        throw ChatError.rateLimited('deepseek');
-      } else {
-        throw new ChatError(errorMessage, 'HTTP_ERROR');
+    }).catch((error: Error) => {
+      if (!hasError && !completed) {
+        hasError = true;
+        const chatError = ChatError.networkError(error.message);
+        callbacks.onError?.(chatError);
+        httpRequest.destroy();
+        reject(chatError);
       }
-    }
-    
-    // HarmonyOS的http模块不支持真正的流式读取
-    // 我们需要使用on('dataReceive')事件或分段读取
-    // 这里简化处理，直接返回完整响应
-    const fullResponse = response.result as string;
-    
-    // 按SSE格式分割并逐个处理
-    const parser = new SseParser();
-    const events = parser.parse(fullResponse);
-    
-    for (const event of events) {
-      if (abortSignal?.aborted) {
-        throw ChatError.stopped();
-      }
-      callbacks.onData(event.data);
-    }
-    
-    // 处理缓冲区剩余内容
-    const remaining = parser.flush();
-    if (remaining && remaining.data) {
-      callbacks.onData(remaining.data);
-    }
-    
-    callbacks.onComplete?.();
-    
-  } catch (error) {
-    if (error instanceof ChatError) {
-      callbacks.onError?.(error);
-      throw error;
-    }
-    
-    const chatError = ChatError.networkError((error as Error).message);
-    callbacks.onError?.(chatError);
-    throw chatError;
-    
-  } finally {
-    httpRequest.destroy();
-  }
+    });
+  });
 }
 
 // 普通JSON请求

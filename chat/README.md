@@ -49,8 +49,9 @@
 
 ### 技术亮点
 
-- **流式处理**：
-  - 正确处理UTF-8字符跨网络分片
+- **真正的流式处理**：
+  - 使用HarmonyOS的`requestInStream`和`on('dataReceive')`回调实现真正的流式接收
+  - 正确处理UTF-8字符跨网络分片（使用TextDecoder的stream选项）
   - 处理SSE事件跨分片和多事件情况
   - 支持LF/CRLF换行
   - 处理连接结束前的缓冲数据
@@ -61,7 +62,7 @@
   - 正确处理工具调用的结构化数据
 
 - **扩散输出**：
-  - Mercury的扩散模式实时展示文本修订
+  - Mercury的扩散模式（默认开启）实时展示文本修订过程
   - 处理全量帧与增量帧的不同语义
   - 准确显示最终文本
 
@@ -69,6 +70,11 @@
   - 正确保存 `thoughtSignature`
   - 维护签名与Part的对应关系和顺序
   - 支持带签名的函数调用和结果回传
+
+- **OpenAI速度模式**：
+  - Fast模式：使用`service_tier: "fast"`参数
+  - Ultrafast模式：使用`service_tier: "ultrafast"`参数
+  - 实际影响API调用，不只是UI配置
 
 ## 使用说明
 
@@ -154,12 +160,12 @@ chat/entry/src/main/ets/
 4. **工具调用**：search和fetch工具使用DeepSeek API，需要配置DeepSeek Key
 5. **会话限制**：最多保留50个会话，超过后自动清理最旧会话
 6. **工具循环限制**：单次对话最多10轮工具调用，防止无限循环
+7. **扩散模式**：Mercury的扩散输出是默认功能，不是实验性特性
 
 ## 已知限制
 
-- HarmonyOS HTTP模块不支持真正的流式读取，当前实现通过分段处理模拟流式效果
-- 扩散模式为实验性功能，可能不稳定
 - 部分模型的某些参数组合可能不受服务商支持
+- OpenAI的Fast/Ultrafast模式仅对特定模型有效（gpt-6-astra和gpt-6.1-sol）
 
 ## 开发者信息
 

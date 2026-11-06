@@ -46,7 +46,7 @@ export interface ModelCapabilities {
   supportsThinking: boolean;       // 支持思考模式
   supportsToolCall: boolean;       // 支持工具调用
   supportsStream: boolean;         // 支持流式输出
-  supportsDiffusion?: boolean;     // 支持扩散输出(Mercury)
+  supportsDiffusion?: boolean;     // 支持扩散输出(Mercury默认功能)
   thinkingEfforts?: ThinkingEffort[]; // 可选的思考强度
   reasoningModes?: OpenAIReasoningMode[]; // OpenAI的reasoning modes
   speedModes?: OpenAISpeedMode[];  // OpenAI的速度模式
@@ -114,7 +114,7 @@ export interface Message {
     // Gemini
     gemini?: {
       parts?: ContentPart[];
-      thoughtSignatures?: Map<number, string>;
+      thoughtSignatures?: Record<number, string>; // 使用Record而不是Map以便JSON序列化
     };
     // DeepSeek Anthropic API
     deepseek?: {

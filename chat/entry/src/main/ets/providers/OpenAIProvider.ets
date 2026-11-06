@@ -1,3 +1,4 @@
+import { httpStreamRequest } from '../services/HttpStream';
 import {
   Message,
   ModelConfig,
@@ -6,7 +7,7 @@ import {
   ProviderSettings,
   ChatError
 } from '../types/Types';
-import http from '@ohos.net.http';
+import { StreamChatCallbacks } from './DeepSeekProvider';
 
 // OpenAI Responses API 请求
 interface OpenAIRequest {
@@ -17,8 +18,8 @@ interface OpenAIRequest {
     effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
     mode?: 'standard' | 'pro';
   };
+  service_tier?: 'auto' | 'fast' | 'ultrafast';
   tools?: OpenAITool[];
-  previous_response_id?: string;
   store?: boolean;
 }
 
@@ -173,11 +174,12 @@ export class OpenAIProvider {
   }
   
   // 流式请求
-  async *streamChat(
+  streamChat(
     messages: Message[],
     config: ModelConfig,
+    callbacks: StreamChatCallbacks,
     abortSignal?: { aborted: boolean }
-  ): AsyncGenerator<StreamEvent> {
+  ): void {
     const url = `${this.baseUrl}/v1/responses`;
     
     const requestBody: OpenAIRequest = {
@@ -199,199 +201,163 @@ export class OpenAIProvider {
       }
     }
     
-    const httpRequest = http.createHttp();
+    // 速度模式配置(实际功能)
+    if (config.speedMode && config.speedMode !== 'normal') {
+      requestBody.service_tier = config.speedMode as 'fast' | 'ultrafast';
+    }
     
-    try {
-      const response = await httpRequest.request(
+    let currentToolCall: Partial<ToolCall> | null = null;
+    let toolCallArgs = '';
+    let responseId = '';
+    let encryptedContent = '';
+    
+    httpStreamRequest(
+      {
         url,
-        {
-          method: http.RequestMethod.POST,
-          header: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${this.settings.apiKey}`
-          },
-          extraData: JSON.stringify(requestBody),
-          readTimeout: 300000,
-          connectTimeout: 30000,
-          expectDataType: http.HttpDataType.STRING
-        }
-      );
-      
-      if (abortSignal?.aborted) {
-        throw ChatError.stopped();
-      }
-      
-      if (response.responseCode !== 200) {
-        const errorBody = response.result as string;
-        this.handleHttpError(response.responseCode, errorBody);
-      }
-      
-      // 解析SSE流
-      const fullResponse = response.result as string;
-      const lines = fullResponse.split('\n');
-      
-      let currentToolCall: Partial<ToolCall> | null = null;
-      let toolCallArgs = '';
-      let responseId = '';
-      let encryptedContent = '';
-      
-      for (const line of lines) {
-        if (abortSignal?.aborted) {
-          throw ChatError.stopped();
-        }
-        
-        if (!line.startsWith('data: ')) continue;
-        
-        const data = line.substring(6).trim();
-        if (data === '[DONE]') break;
-        
-        try {
-          const event: OpenAIStreamEvent = JSON.parse(data);
-          
-          // 处理错误
-          if (event.error) {
-            yield {
-              type: 'error',
-              error: event.error.message
-            };
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.settings.apiKey}`
+        },
+        body: JSON.stringify(requestBody),
+        timeout: 300000
+      },
+      {
+        onData: (data: string) => {
+          if (abortSignal?.aborted) {
             return;
           }
           
-          // 记录响应ID
-          if (event.response?.id) {
-            responseId = event.response.id;
+          if (data === '[DONE]') {
+            return;
           }
           
-          // 处理不同类型的事件
-          switch (event.type) {
-            case 'response.output_item.added':
-              if (event.item?.type === 'function_call') {
-                currentToolCall = {
-                  id: event.item.id || '',
-                  type: event.item.name as 'search' | 'fetch',
-                  arguments: '',
-                  status: 'pending'
-                };
-                toolCallArgs = '';
-                yield {
-                  type: 'tool_call_start',
-                  toolCall: currentToolCall
-                };
-              }
-              break;
-              
-            case 'response.summary_text.delta':
-              if (event.delta) {
-                yield {
-                  type: 'thinking_delta',
-                  data: event.delta
-                };
-              }
-              break;
-              
-            case 'response.output_text.delta':
-              if (event.delta) {
-                yield {
-                  type: 'content_delta',
-                  data: event.delta
-                };
-              }
-              break;
-              
-            case 'response.function_call_arguments.delta':
-              if (event.delta && currentToolCall) {
-                toolCallArgs += event.delta;
-                yield {
-                  type: 'tool_call_delta',
-                  toolCall: { ...currentToolCall, arguments: toolCallArgs }
-                };
-              }
-              break;
-              
-            case 'response.function_call_arguments.done':
-              if (currentToolCall) {
-                currentToolCall.arguments = toolCallArgs;
-                currentToolCall.status = 'pending';
-                yield {
-                  type: 'tool_call_end',
-                  toolCall: currentToolCall
-                };
-                currentToolCall = null;
-                toolCallArgs = '';
-              }
-              break;
-              
-            case 'response.completed':
-              // 提取加密的reasoning内容用于后续请求
-              if (event.response?.output) {
-                for (const item of event.response.output) {
-                  if (item.type === 'reasoning' && item.encrypted_content) {
-                    encryptedContent = item.encrypted_content;
-                  }
-                }
-              }
-              
-              if (event.response?.usage) {
-                yield {
-                  type: 'usage',
-                  usage: {
-                    inputTokens: event.response.usage.input_tokens,
-                    outputTokens: event.response.usage.output_tokens
-                  }
-                };
-              }
-              
-              yield {
-                type: 'complete',
-                protocolData: {
-                  responseId,
-                  encryptedContent: encryptedContent || undefined,
-                  output: event.response?.output
-                }
-              };
+          try {
+            const event: OpenAIStreamEvent = JSON.parse(data);
+            
+            // 处理错误
+            if (event.error) {
+              callbacks.onEvent({
+                type: 'error',
+                error: event.error.message
+              });
               return;
+            }
+            
+            // 记录响应ID
+            if (event.response?.id) {
+              responseId = event.response.id;
+            }
+            
+            // 处理不同类型的事件
+            switch (event.type) {
+              case 'response.output_item.added':
+                if (event.item?.type === 'function_call') {
+                  currentToolCall = {
+                    id: event.item.id || '',
+                    type: event.item.name as 'search' | 'fetch',
+                    arguments: '',
+                    status: 'pending'
+                  };
+                  toolCallArgs = '';
+                  callbacks.onEvent({
+                    type: 'tool_call_start',
+                    toolCall: currentToolCall
+                  });
+                }
+                break;
+                
+              case 'response.summary_text.delta':
+                if (event.delta) {
+                  callbacks.onEvent({
+                    type: 'thinking_delta',
+                    data: event.delta
+                  });
+                }
+                break;
+                
+              case 'response.output_text.delta':
+                if (event.delta) {
+                  callbacks.onEvent({
+                    type: 'content_delta',
+                    data: event.delta
+                  });
+                }
+                break;
+                
+              case 'response.function_call_arguments.delta':
+                if (event.delta && currentToolCall) {
+                  toolCallArgs += event.delta;
+                  callbacks.onEvent({
+                    type: 'tool_call_delta',
+                    toolCall: { ...currentToolCall, arguments: toolCallArgs }
+                  });
+                }
+                break;
+                
+              case 'response.function_call_arguments.done':
+                if (currentToolCall) {
+                  currentToolCall.arguments = toolCallArgs;
+                  currentToolCall.status = 'pending';
+                  callbacks.onEvent({
+                    type: 'tool_call_end',
+                    toolCall: currentToolCall
+                  });
+                  currentToolCall = null;
+                  toolCallArgs = '';
+                }
+                break;
+                
+              case 'response.completed':
+                // 提取加密的reasoning内容用于后续请求
+                if (event.response?.output) {
+                  for (const item of event.response.output) {
+                    if (item.type === 'reasoning' && item.encrypted_content) {
+                      encryptedContent = item.encrypted_content;
+                    }
+                  }
+                }
+                
+                if (event.response?.usage) {
+                  callbacks.onEvent({
+                    type: 'usage',
+                    usage: {
+                      inputTokens: event.response.usage.input_tokens,
+                      outputTokens: event.response.usage.output_tokens
+                    }
+                  });
+                }
+                
+                callbacks.onEvent({
+                  type: 'complete',
+                  protocolData: {
+                    responseId,
+                    encryptedContent: encryptedContent || undefined,
+                    output: event.response?.output
+                  }
+                });
+                break;
+            }
+          } catch (e) {
+            console.error('OpenAI stream parse error:', e);
           }
-        } catch (e) {
-          console.error('OpenAI stream parse error:', e);
+        },
+        
+        onComplete: () => {
+          callbacks.onComplete();
+        },
+        
+        onError: (error: Error) => {
+          callbacks.onError(error);
         }
-      }
-      
-      yield { type: 'complete' };
-      
-    } catch (error) {
+      },
+      abortSignal
+    ).catch((error: Error) => {
       if (error instanceof ChatError) {
-        yield { type: 'error', error: error.message };
-        throw error;
+        callbacks.onError(error);
+      } else {
+        callbacks.onError(ChatError.networkError(error.message));
       }
-      const chatError = ChatError.networkError((error as Error).message);
-      yield { type: 'error', error: chatError.message };
-      throw chatError;
-    } finally {
-      httpRequest.destroy();
-    }
-  }
-  
-  // 处理HTTP错误
-  private handleHttpError(statusCode: number, body: string): never {
-    let errorMessage = `HTTP ${statusCode}`;
-    
-    try {
-      const errorJson = JSON.parse(body);
-      if (errorJson.error?.message) {
-        errorMessage = errorJson.error.message;
-      }
-    } catch {
-      if (body) {
-        errorMessage = body.substring(0, 200);
-      }
-    }
-    
-    if (statusCode === 401 || statusCode === 403) {
-      throw ChatError.invalidApiKey('openai');
-    } else if (statusCode === 429) {
-      throw ChatError.rateLimited('openai');
-    } else {
-      throw new ChatError(errorMessage, 'HTTP_ERROR', 'openai');
-    }
+    });
   }
 }

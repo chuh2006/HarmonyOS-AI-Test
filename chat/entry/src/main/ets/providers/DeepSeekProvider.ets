@@ -1,4 +1,4 @@
-import { httpJsonRequest } from '../services/HttpStream';
+import { httpStreamRequest } from '../services/HttpStream';
 import {
   Message,
   ModelConfig,
@@ -8,7 +8,6 @@ import {
   ChatError,
   ContentPart
 } from '../types/Types';
-import http from '@ohos.net.http';
 
 // DeepSeek Anthropic API 消息格式
 interface AnthropicMessage {
@@ -34,7 +33,7 @@ interface DeepSeekRequest {
   max_tokens: number;
   stream: boolean;
   thinking?: { type: 'enabled' | 'disabled' };
-  output_config?: { effort: 'low' | 'high' | 'max' };
+  reasoning_effort?: 'low' | 'high' | 'max';
   tools?: DeepSeekTool[];
 }
 
@@ -73,6 +72,13 @@ interface DeepSeekStreamEvent {
   };
 }
 
+// 流式回调
+export interface StreamChatCallbacks {
+  onEvent: (event: StreamEvent) => void;
+  onComplete: () => void;
+  onError: (error: Error) => void;
+}
+
 export class DeepSeekProvider {
   private settings: ProviderSettings;
   private baseUrl: string;
@@ -88,7 +94,6 @@ export class DeepSeekProvider {
     
     for (const msg of messages) {
       if (msg.role === 'system') {
-        // DeepSeek不支持system消息，转为user消息前缀
         continue;
       }
       
@@ -124,7 +129,7 @@ export class DeepSeekProvider {
         });
       }
       
-      // 处理工具结果(role=tool的消息)
+      // 处理工具结果
       if (msg.role === 'tool' && msg.toolCalls && msg.toolCalls.length > 0) {
         for (const tc of msg.toolCalls) {
           if (tc.result) {
@@ -182,12 +187,13 @@ export class DeepSeekProvider {
     ];
   }
   
-  // 流式请求
-  async *streamChat(
+  // 流式请求(使用回调)
+  streamChat(
     messages: Message[],
     config: ModelConfig,
+    callbacks: StreamChatCallbacks,
     abortSignal?: { aborted: boolean }
-  ): AsyncGenerator<StreamEvent> {
+  ): void {
     const url = `${this.baseUrl}/anthropic/v1/messages`;
     
     const requestBody: DeepSeekRequest = {
@@ -198,194 +204,151 @@ export class DeepSeekProvider {
       tools: this.getToolDefinitions()
     };
     
-    // 思考配置
+    // 思考配置(使用正确的参数名)
     if (config.thinkingEnabled && config.thinkingEffort !== 'none') {
       requestBody.thinking = { type: 'enabled' };
-      requestBody.output_config = {
-        effort: config.thinkingEffort as 'low' | 'high' | 'max'
-      };
+      requestBody.reasoning_effort = config.thinkingEffort as 'low' | 'high' | 'max';
     } else {
       requestBody.thinking = { type: 'disabled' };
     }
     
-    const httpRequest = http.createHttp();
+    let currentToolCall: Partial<ToolCall> | null = null;
+    let toolCallJson = '';
+    let thinkingContent = '';
     
-    try {
-      const response = await httpRequest.request(
+    httpStreamRequest(
+      {
         url,
-        {
-          method: http.RequestMethod.POST,
-          header: {
-            'Content-Type': 'application/json',
-            'x-api-key': this.settings.apiKey,
-            'anthropic-version': '2023-06-01'
-          },
-          extraData: JSON.stringify(requestBody),
-          readTimeout: 300000,
-          connectTimeout: 30000,
-          expectDataType: http.HttpDataType.STRING
-        }
-      );
-      
-      if (abortSignal?.aborted) {
-        throw ChatError.stopped();
-      }
-      
-      if (response.responseCode !== 200) {
-        const errorBody = response.result as string;
-        this.handleHttpError(response.responseCode, errorBody);
-      }
-      
-      // 解析SSE流
-      const fullResponse = response.result as string;
-      const lines = fullResponse.split('\n');
-      
-      let currentToolCall: Partial<ToolCall> | null = null;
-      let toolCallJson = '';
-      let thinkingContent = '';
-      
-      for (const line of lines) {
-        if (abortSignal?.aborted) {
-          throw ChatError.stopped();
-        }
-        
-        if (!line.startsWith('data: ')) continue;
-        
-        const data = line.substring(6).trim();
-        if (data === '[DONE]') break;
-        
-        try {
-          const event: DeepSeekStreamEvent = JSON.parse(data);
-          
-          // 处理错误
-          if (event.error) {
-            yield {
-              type: 'error',
-              error: event.error.message
-            };
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': this.settings.apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify(requestBody),
+        timeout: 300000
+      },
+      {
+        onData: (data: string) => {
+          if (abortSignal?.aborted) {
             return;
           }
           
-          // 处理不同类型的事件
-          switch (event.type) {
-            case 'content_block_start':
-              if (event.content_block?.type === 'thinking') {
-                yield { type: 'thinking_delta', data: '' };
-              } else if (event.content_block?.type === 'tool_use') {
-                currentToolCall = {
-                  id: event.content_block.id || '',
-                  type: event.content_block.name as 'search' | 'fetch',
-                  arguments: '',
-                  status: 'pending'
-                };
-                toolCallJson = '';
-                yield {
-                  type: 'tool_call_start',
-                  toolCall: currentToolCall
-                };
-              }
-              break;
-              
-            case 'content_block_delta':
-              if (event.delta?.type === 'thinking_delta' && event.delta.thinking) {
-                thinkingContent += event.delta.thinking;
-                yield {
-                  type: 'thinking_delta',
-                  data: event.delta.thinking,
-                  protocolData: { thinkingContent }
-                };
-              } else if (event.delta?.type === 'text_delta' && event.delta.text) {
-                yield {
-                  type: 'content_delta',
-                  data: event.delta.text
-                };
-              } else if (event.delta?.type === 'input_json_delta' && event.delta.partial_json) {
-                toolCallJson += event.delta.partial_json;
-                if (currentToolCall) {
-                  yield {
-                    type: 'tool_call_delta',
-                    toolCall: { ...currentToolCall, arguments: toolCallJson }
-                  };
-                }
-              }
-              break;
-              
-            case 'content_block_stop':
-              if (currentToolCall) {
-                currentToolCall.arguments = toolCallJson;
-                currentToolCall.status = 'pending';
-                yield {
-                  type: 'tool_call_end',
-                  toolCall: currentToolCall
-                };
-                currentToolCall = null;
-                toolCallJson = '';
-              }
-              break;
-              
-            case 'message_delta':
-              if (event.usage) {
-                yield {
-                  type: 'usage',
-                  usage: {
-                    inputTokens: event.usage.input_tokens,
-                    outputTokens: event.usage.output_tokens
-                  }
-                };
-              }
-              break;
-              
-            case 'message_stop':
-              yield {
-                type: 'complete',
-                protocolData: {
-                  thinkingContent: thinkingContent || undefined
-                }
-              };
-              return;
+          if (data === '[DONE]') {
+            return;
           }
-        } catch (e) {
-          // 忽略JSON解析错误，继续处理下一个事件
-          console.error('DeepSeek stream parse error:', e);
+          
+          try {
+            const event: DeepSeekStreamEvent = JSON.parse(data);
+            
+            // 处理错误
+            if (event.error) {
+              callbacks.onEvent({
+                type: 'error',
+                error: event.error.message
+              });
+              return;
+            }
+            
+            // 处理不同类型的事件
+            switch (event.type) {
+              case 'content_block_start':
+                if (event.content_block?.type === 'thinking') {
+                  callbacks.onEvent({ type: 'thinking_delta', data: '' });
+                } else if (event.content_block?.type === 'tool_use') {
+                  currentToolCall = {
+                    id: event.content_block.id || '',
+                    type: event.content_block.name as 'search' | 'fetch',
+                    arguments: '',
+                    status: 'pending'
+                  };
+                  toolCallJson = '';
+                  callbacks.onEvent({
+                    type: 'tool_call_start',
+                    toolCall: currentToolCall
+                  });
+                }
+                break;
+                
+              case 'content_block_delta':
+                if (event.delta?.type === 'thinking_delta' && event.delta.thinking) {
+                  thinkingContent += event.delta.thinking;
+                  callbacks.onEvent({
+                    type: 'thinking_delta',
+                    data: event.delta.thinking,
+                    protocolData: { thinkingContent }
+                  });
+                } else if (event.delta?.type === 'text_delta' && event.delta.text) {
+                  callbacks.onEvent({
+                    type: 'content_delta',
+                    data: event.delta.text
+                  });
+                } else if (event.delta?.type === 'input_json_delta' && event.delta.partial_json) {
+                  toolCallJson += event.delta.partial_json;
+                  if (currentToolCall) {
+                    callbacks.onEvent({
+                      type: 'tool_call_delta',
+                      toolCall: { ...currentToolCall, arguments: toolCallJson }
+                    });
+                  }
+                }
+                break;
+                
+              case 'content_block_stop':
+                if (currentToolCall) {
+                  currentToolCall.arguments = toolCallJson;
+                  currentToolCall.status = 'pending';
+                  callbacks.onEvent({
+                    type: 'tool_call_end',
+                    toolCall: currentToolCall
+                  });
+                  currentToolCall = null;
+                  toolCallJson = '';
+                }
+                break;
+                
+              case 'message_delta':
+                if (event.usage) {
+                  callbacks.onEvent({
+                    type: 'usage',
+                    usage: {
+                      inputTokens: event.usage.input_tokens,
+                      outputTokens: event.usage.output_tokens
+                    }
+                  });
+                }
+                break;
+                
+              case 'message_stop':
+                callbacks.onEvent({
+                  type: 'complete',
+                  protocolData: {
+                    thinkingContent: thinkingContent || undefined
+                  }
+                });
+                break;
+            }
+          } catch (e) {
+            console.error('DeepSeek stream parse error:', e);
+          }
+        },
+        
+        onComplete: () => {
+          callbacks.onComplete();
+        },
+        
+        onError: (error: Error) => {
+          callbacks.onError(error);
         }
-      }
-      
-      yield { type: 'complete' };
-      
-    } catch (error) {
+      },
+      abortSignal
+    ).catch((error: Error) => {
+      // 处理HTTP错误
       if (error instanceof ChatError) {
-        yield { type: 'error', error: error.message };
-        throw error;
+        callbacks.onError(error);
+      } else {
+        callbacks.onError(ChatError.networkError(error.message));
       }
-      const chatError = ChatError.networkError((error as Error).message);
-      yield { type: 'error', error: chatError.message };
-      throw chatError;
-    } finally {
-      httpRequest.destroy();
-    }
-  }
-  
-  // 处理HTTP错误
-  private handleHttpError(statusCode: number, body: string): never {
-    let errorMessage = `HTTP ${statusCode}`;
-    
-    try {
-      const errorJson = JSON.parse(body);
-      if (errorJson.error?.message) {
-        errorMessage = errorJson.error.message;
-      }
-    } catch {
-      if (body) {
-        errorMessage = body.substring(0, 200);
-      }
-    }
-    
-    if (statusCode === 401 || statusCode === 403) {
-      throw ChatError.invalidApiKey('deepseek');
-    } else if (statusCode === 429) {
-      throw ChatError.rateLimited('deepseek');
-    } else {
-      throw new ChatError(errorMessage, 'HTTP_ERROR', 'deepseek');
-    }
+    });
   }
 }

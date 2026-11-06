@@ -176,152 +176,155 @@ export class ChatEngine {
       
       // 流式生成
       const provider = this.getProvider(config);
-      const stream = provider.streamChat(currentMessages, config, this.abortSignal);
       
       let fullContent = '';
       let fullThinking = '';
       let hasToolCalls = false;
       const toolCalls: ToolCall[] = [];
       let protocolData: any = null;
+      let streamCompleted = false;
+      let streamError: Error | null = null;
       
-      try {
-        for await (const event of stream) {
-          if (this.abortSignal.aborted) {
-            assistantMessage.status = 'stopped';
-            await this.store.updateMessage(sessionId, assistantMessage.id, {
-              status: 'stopped',
-              content: fullContent
-            });
-            callbacks.onMessageUpdate(assistantMessage);
-            throw ChatError.stopped();
-          }
-          
-          // 处理不同类型的流事件
-          switch (event.type) {
-            case 'thinking_delta':
-              this.currentPhase = 'thinking';
-              if (event.data) {
-                fullThinking += event.data;
-                assistantMessage.thinking = fullThinking;
-                callbacks.onMessageUpdate({ ...assistantMessage });
+      // 使用Promise包装回调
+      await new Promise<void>((resolve) => {
+        provider.streamChat(
+          currentMessages,
+          config,
+          {
+            onEvent: (event: StreamEvent) => {
+              if (this.abortSignal.aborted) {
+                return;
               }
-              break;
               
-            case 'content_delta':
-              this.currentPhase = 'answering';
-              if (event.data) {
-                fullContent += event.data;
-                assistantMessage.content = fullContent;
-                callbacks.onMessageUpdate({ ...assistantMessage });
+              // 处理不同类型的流事件
+              switch (event.type) {
+                case 'thinking_delta':
+                  this.currentPhase = 'thinking';
+                  if (event.data) {
+                    fullThinking += event.data;
+                    assistantMessage.thinking = fullThinking;
+                    callbacks.onMessageUpdate({ ...assistantMessage });
+                  }
+                  break;
+                  
+                case 'content_delta':
+                  this.currentPhase = 'answering';
+                  if (event.data) {
+                    fullContent += event.data;
+                    assistantMessage.content = fullContent;
+                    callbacks.onMessageUpdate({ ...assistantMessage });
+                  }
+                  break;
+                  
+                case 'content_replace':
+                  // 扩散模式:替换整个内容
+                  this.currentPhase = 'answering';
+                  if (event.data) {
+                    fullContent = event.data;
+                    assistantMessage.content = fullContent;
+                    callbacks.onMessageUpdate({ ...assistantMessage });
+                  }
+                  break;
+                  
+                case 'tool_call_start':
+                  this.currentPhase = 'tool_calling';
+                  hasToolCalls = true;
+                  if (event.toolCall) {
+                    const tc: ToolCall = {
+                      id: event.toolCall.id || '',
+                      type: event.toolCall.type || 'search',
+                      arguments: event.toolCall.arguments || '',
+                      status: 'running',
+                      startTime: Date.now()
+                    };
+                    toolCalls.push(tc);
+                    assistantMessage.toolCalls = [...toolCalls];
+                    callbacks.onToolCallUpdate(assistantMessage.id, tc);
+                  }
+                  break;
+                  
+                case 'tool_call_delta':
+                  if (event.toolCall) {
+                    const existingTc = toolCalls.find(tc => tc.id === event.toolCall!.id);
+                    if (existingTc) {
+                      existingTc.arguments = event.toolCall.arguments || '';
+                      callbacks.onToolCallUpdate(assistantMessage.id, existingTc);
+                    }
+                  }
+                  break;
+                  
+                case 'tool_call_end':
+                  if (event.toolCall) {
+                    const existingTc = toolCalls.find(tc => tc.id === event.toolCall!.id);
+                    if (existingTc) {
+                      existingTc.arguments = event.toolCall.arguments || '';
+                      existingTc.status = 'pending';
+                      callbacks.onToolCallUpdate(assistantMessage.id, existingTc);
+                    } else {
+                      // 工具调用完成但没有start事件(Gemini)
+                      const tc: ToolCall = {
+                        id: event.toolCall.id || '',
+                        type: event.toolCall.type || 'search',
+                        arguments: event.toolCall.arguments || '',
+                        status: 'pending',
+                        startTime: Date.now()
+                      };
+                      toolCalls.push(tc);
+                      assistantMessage.toolCalls = [...toolCalls];
+                      callbacks.onToolCallUpdate(assistantMessage.id, tc);
+                      hasToolCalls = true;
+                    }
+                  }
+                  break;
+                  
+                case 'usage':
+                  // 可以记录token使用量
+                  break;
+                  
+                case 'complete':
+                  protocolData = event.protocolData;
+                  break;
+                  
+                case 'error':
+                  streamError = new ChatError(
+                    event.error || '生成失败',
+                    'STREAM_ERROR',
+                    config.providerId
+                  );
+                  break;
               }
-              break;
-              
-            case 'content_replace':
-              // 扩散模式:替换整个内容
-              this.currentPhase = 'answering';
-              if (event.data) {
-                fullContent = event.data;
-                assistantMessage.content = fullContent;
-                callbacks.onMessageUpdate({ ...assistantMessage });
-              }
-              break;
-              
-            case 'tool_call_start':
-              this.currentPhase = 'tool_calling';
-              hasToolCalls = true;
-              if (event.toolCall) {
-                const tc: ToolCall = {
-                  id: event.toolCall.id || '',
-                  type: event.toolCall.type || 'search',
-                  arguments: event.toolCall.arguments || '',
-                  status: 'running',
-                  startTime: Date.now()
-                };
-                toolCalls.push(tc);
-                assistantMessage.toolCalls = [...toolCalls];
-                callbacks.onToolCallUpdate(assistantMessage.id, tc);
-              }
-              break;
-              
-            case 'tool_call_delta':
-              if (event.toolCall) {
-                const existingTc = toolCalls.find(tc => tc.id === event.toolCall!.id);
-                if (existingTc) {
-                  existingTc.arguments = event.toolCall.arguments || '';
-                  callbacks.onToolCallUpdate(assistantMessage.id, existingTc);
-                }
-              }
-              break;
-              
-            case 'tool_call_end':
-              if (event.toolCall) {
-                const existingTc = toolCalls.find(tc => tc.id === event.toolCall!.id);
-                if (existingTc) {
-                  existingTc.arguments = event.toolCall.arguments || '';
-                  existingTc.status = 'pending';
-                  callbacks.onToolCallUpdate(assistantMessage.id, existingTc);
-                }
-              }
-              break;
-              
-            case 'usage':
-              // 可以记录token使用量
-              break;
-              
-            case 'complete':
-              protocolData = event.protocolData;
-              break;
-              
-            case 'error':
-              throw new ChatError(
-                event.error || '生成失败',
-                'STREAM_ERROR',
-                config.providerId
-              );
-          }
-        }
-        
-        // 更新消息为完成状态
-        assistantMessage.content = fullContent;
-        assistantMessage.thinking = fullThinking || undefined;
-        assistantMessage.toolCalls = toolCalls;
-        
-        // 保存协议数据
-        if (protocolData) {
-          this.saveProtocolData(assistantMessage, config.providerId, protocolData);
-        }
-        
-        // 如果有工具调用，执行工具
-        if (hasToolCalls && toolCalls.length > 0) {
-          assistantMessage.status = 'tool_call';
-          await this.store.updateMessage(sessionId, assistantMessage.id, assistantMessage);
-          callbacks.onMessageUpdate(assistantMessage);
-          
-          // 执行工具调用
-          await this.executeTools(sessionId, assistantMessage, toolCalls, callbacks);
-          
-          // 重新获取消息历史，继续生成
-          const updatedSession = await this.store.getSession(sessionId);
-          if (updatedSession) {
-            currentMessages = updatedSession.messages;
-            continue; // 继续下一轮生成
-          }
-        } else {
-          // 没有工具调用，完成生成
-          assistantMessage.status = 'complete';
-          await this.store.updateMessage(sessionId, assistantMessage.id, assistantMessage);
-          callbacks.onMessageUpdate(assistantMessage);
-          callbacks.onComplete(assistantMessage);
-          
-          this.currentPhase = 'complete';
-          this.currentMessageId = undefined;
-          return;
-        }
-        
-      } catch (error) {
-        // 处理错误
+            },
+            
+            onComplete: () => {
+              streamCompleted = true;
+              resolve();
+            },
+            
+            onError: (error: Error) => {
+              streamError = error;
+              streamCompleted = true;
+              resolve();
+            }
+          },
+          this.abortSignal
+        );
+      });
+      
+      // 检查中止
+      if (this.abortSignal.aborted) {
+        assistantMessage.status = 'stopped';
+        await this.store.updateMessage(sessionId, assistantMessage.id, {
+          status: 'stopped',
+          content: fullContent
+        });
+        callbacks.onMessageUpdate(assistantMessage);
+        throw ChatError.stopped();
+      }
+      
+      // 检查错误
+      if (streamError) {
         assistantMessage.status = 'error';
-        assistantMessage.error = (error as Error).message;
+        assistantMessage.error = streamError.message;
         assistantMessage.content = fullContent; // 保留已生成的内容
         
         await this.store.updateMessage(sessionId, assistantMessage.id, assistantMessage);
@@ -330,13 +333,45 @@ export class ChatEngine {
         this.currentPhase = 'error';
         this.currentMessageId = undefined;
         
-        if (error instanceof ChatError && error.code === 'STOPPED') {
-          // 用户主动停止，不算错误
-          return;
-        }
+        callbacks.onError(streamError);
+        throw streamError;
+      }
+      
+      // 更新消息为完成状态
+      assistantMessage.content = fullContent;
+      assistantMessage.thinking = fullThinking || undefined;
+      assistantMessage.toolCalls = toolCalls;
+      
+      // 保存协议数据
+      if (protocolData) {
+        this.saveProtocolData(assistantMessage, config.providerId, protocolData);
+      }
+      
+      // 如果有工具调用，执行工具
+      if (hasToolCalls && toolCalls.length > 0) {
+        assistantMessage.status = 'tool_call';
+        await this.store.updateMessage(sessionId, assistantMessage.id, assistantMessage);
+        callbacks.onMessageUpdate(assistantMessage);
         
-        callbacks.onError(error as Error);
-        throw error;
+        // 执行工具调用
+        await this.executeTools(sessionId, assistantMessage, toolCalls, callbacks);
+        
+        // 重新获取消息历史，继续生成
+        const updatedSession = await this.store.getSession(sessionId);
+        if (updatedSession) {
+          currentMessages = updatedSession.messages;
+          continue; // 继续下一轮生成
+        }
+      } else {
+        // 没有工具调用，完成生成
+        assistantMessage.status = 'complete';
+        await this.store.updateMessage(sessionId, assistantMessage.id, assistantMessage);
+        callbacks.onMessageUpdate(assistantMessage);
+        callbacks.onComplete(assistantMessage);
+        
+        this.currentPhase = 'complete';
+        this.currentMessageId = undefined;
+        return;
       }
     }
     
