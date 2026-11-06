@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "AI聊天助手模块"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "多模型AI聊天应用"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "MiniChat"
     }
   ]
 }
