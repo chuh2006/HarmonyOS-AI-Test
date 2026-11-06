@@ -1,26 +1,5 @@
-import { httpJsonRequest } from './HttpStream';
-import { ProviderSettings, ChatError } from '../types/Types';
-
-// 搜索结果项
-export interface SearchResultItem {
-  title: string;
-  url: string;
-  snippet: string;
-  content?: string;
-}
-
-// 搜索响应
-interface SearchResponse {
-  results: SearchResultItem[];
-  total?: number;
-}
-
-// 抓取响应
-interface FetchResponse {
-  content: string;
-  title?: string;
-  url?: string;
-}
+import { httpJsonRequest, extractErrorMessage, JsonResponse, HttpRequestOptions } from './HttpStream';
+import { ChatError, ProviderSettings, ToolType } from '../types/Types';
 
 // 工具执行结果
 export interface ToolResult {
@@ -29,221 +8,328 @@ export interface ToolResult {
   error?: string;
 }
 
+// 搜索结果项(给模型看的完整内容)
+export interface SearchResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+  content?: string;
+}
+
+function toRecord(value: Object): Record<string, Object> {
+  return value as Record<string, Object>;
+}
+
+function isRecord(value: Object | undefined): boolean {
+  if (value === undefined || value === null) {
+    return false;
+  }
+  if (typeof value !== 'object') {
+    return false;
+  }
+  return !Array.isArray(value);
+}
+
+function readString(obj: Record<string, Object>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value: Object | undefined = obj[key];
+    if (value !== undefined && value !== null && typeof value === 'string') {
+      return value as string;
+    }
+  }
+  return undefined;
+}
+
+function readNumber(obj: Record<string, Object>, key: string): number | undefined {
+  const value: Object | undefined = obj[key];
+  if (value !== undefined && value !== null && typeof value === 'number') {
+    return value as number;
+  }
+  return undefined;
+}
+
+function readArray(obj: Record<string, Object>, keys: string[]): Object[] | undefined {
+  for (const key of keys) {
+    const value: Object | undefined = obj[key];
+    if (value !== undefined && value !== null && Array.isArray(value)) {
+      return value as Object[];
+    }
+  }
+  return undefined;
+}
+
+// 在响应中定位结果数组(兼容直接返回或包在 data 字段里)
+function findResultArray(root: Record<string, Object>): Object[] | undefined {
+  const direct: Object[] | undefined = readArray(root, ['results', 'result', 'items', 'search_results']);
+  if (direct !== undefined) {
+    return direct;
+  }
+  const dataValue: Object | undefined = root['data'];
+  if (dataValue !== undefined && Array.isArray(dataValue)) {
+    return dataValue as Object[];
+  }
+  if (dataValue !== undefined && isRecord(dataValue)) {
+    return readArray(toRecord(dataValue), ['results', 'result', 'items', 'search_results']);
+  }
+  return undefined;
+}
+
+function truncate(text: string, limit: number, suffix: string): string {
+  if (text.length > limit) {
+    return text.substring(0, limit) + suffix;
+  }
+  return text;
+}
+
+// 提取域名(ArkTS环境无URL类，手动解析)
+export function extractHostname(url: string): string {
+  let rest: string = url.trim();
+  const schemeIdx: number = rest.indexOf('://');
+  if (schemeIdx !== -1) {
+    rest = rest.substring(schemeIdx + 3);
+  }
+  const slashIdx: number = rest.indexOf('/');
+  if (slashIdx !== -1) {
+    rest = rest.substring(0, slashIdx);
+  }
+  const questionIdx: number = rest.indexOf('?');
+  if (questionIdx !== -1) {
+    rest = rest.substring(0, questionIdx);
+  }
+  const atIdx: number = rest.indexOf('@');
+  if (atIdx !== -1) {
+    rest = rest.substring(atIdx + 1);
+  }
+  return rest.length > 0 ? rest : url;
+}
+
+// DeepSeek 的 search / fetch 工具，四个服务商共用
 export class DeepSeekTools {
-  private apiKey?: string;
+  private apiKey: string;
   private baseUrl: string;
-  
+
   constructor(settings?: ProviderSettings) {
-    this.apiKey = settings?.apiKey;
-    this.baseUrl = settings?.baseUrl || 'https://api.deepseek.com';
+    this.apiKey = settings !== undefined && settings.apiKey !== undefined ? settings.apiKey : '';
+    let base: string = settings !== undefined && settings.baseUrl !== undefined && settings.baseUrl.length > 0
+      ? settings.baseUrl : 'https://api.deepseek.com';
+    if (base.endsWith('/')) {
+      base = base.substring(0, base.length - 1);
+    }
+    this.baseUrl = base;
   }
-  
-  // 检查是否配置了DeepSeek API Key
+
   isAvailable(): boolean {
-    return !!this.apiKey && this.apiKey.trim().length > 0;
+    return this.apiKey.trim().length > 0;
   }
-  
-  // 执行搜索
-  async search(query: string, count: number = 5): Promise<ToolResult> {
-    if (!this.isAvailable()) {
-      return {
-        success: false,
-        error: '未配置 DeepSeek API Key，无法使用搜索功能'
+
+  private static fail(message: string): ToolResult {
+    const result: ToolResult = { success: false, error: message };
+    return result;
+  }
+
+  private static ok(data: string): ToolResult {
+    const result: ToolResult = { success: true, data: data };
+    return result;
+  }
+
+  private request(endpoint: string, body: string, timeout: number): Promise<JsonResponse> {
+    return new Promise<JsonResponse>((resolve: (value: JsonResponse) => void, reject: (reason: ChatError) => void) => {
+      const headers: Record<string, string> = {
+        'Authorization': `Bearer ${this.apiKey}`,
+        'Content-Type': 'application/json'
       };
-    }
-    
-    try {
-      const response = await httpJsonRequest<SearchResponse>({
-        url: `${this.baseUrl}/v1/tools/search`,
+      const options: HttpRequestOptions = {
+        url: `${this.baseUrl}${endpoint}`,
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          query,
-          count,
-          need_content: true
-        }),
-        timeout: 30000
+        headers: headers,
+        body: body,
+        timeout: timeout
+      };
+      httpJsonRequest(options, resolve, (error: ChatError) => {
+        reject(error);
       });
-      
-      if (!response.results || response.results.length === 0) {
-        return {
-          success: true,
-          data: '未找到相关结果'
-        };
-      }
-      
-      // 格式化搜索结果(给模型看的完整版本)
-      const formatted = response.results.map((item, idx) => {
-        let text = `${idx + 1}. ${item.title}\n   URL: ${item.url}\n   摘要: ${item.snippet}`;
-        if (item.content) {
-          // 限制内容长度，避免token过多
-          const content = item.content.length > 2000 
-            ? item.content.substring(0, 2000) + '...' 
-            : item.content;
-          text += `\n   内容:\n${content}`;
-        }
-        return text;
-      }).join('\n\n');
-      
-      return {
-        success: true,
-        data: formatted
-      };
-      
-    } catch (error) {
-      if (error instanceof ChatError) {
-        return {
-          success: false,
-          error: error.message
-        };
-      }
-      return {
-        success: false,
-        error: `搜索失败: ${(error as Error).message}`
-      };
-    }
+    });
   }
-  
-  // 抓取网页内容
-  async fetch(url: string): Promise<ToolResult> {
+
+  // 搜索：给模型返回标题/链接/摘要/正文，正文限制长度避免token爆炸
+  search(query: string, count: number): Promise<ToolResult> {
     if (!this.isAvailable()) {
-      return {
-        success: false,
-        error: '未配置 DeepSeek API Key，无法使用抓取功能'
-      };
+      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，无法使用搜索功能'));
     }
-    
-    try {
-      const response = await httpJsonRequest<FetchResponse>({
-        url: `${this.baseUrl}/v1/tools/fetch`,
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ url }),
-        timeout: 60000
-      });
-      
-      if (!response.content) {
-        return {
-          success: true,
-          data: '页面内容为空'
-        };
-      }
-      
-      // 限制内容长度
-      let content = response.content;
-      if (content.length > 8000) {
-        content = content.substring(0, 8000) + '\n\n[内容已截断]';
-      }
-      
-      const formatted = response.title 
-        ? `标题: ${response.title}\nURL: ${url}\n\n${content}`
-        : `URL: ${url}\n\n${content}`;
-      
-      return {
-        success: true,
-        data: formatted
-      };
-      
-    } catch (error) {
-      if (error instanceof ChatError) {
-        return {
-          success: false,
-          error: error.message
-        };
-      }
-      return {
-        success: false,
-        error: `抓取失败: ${(error as Error).message}`
-      };
-    }
-  }
-  
-  // 执行工具调用
-  async executeTool(type: 'search' | 'fetch', args: string): Promise<ToolResult> {
-    try {
-      const parsedArgs = JSON.parse(args);
-      
-      if (type === 'search') {
-        const query = parsedArgs.query;
-        if (!query) {
-          return {
-            success: false,
-            error: '搜索缺少 query 参数'
-          };
+
+    const payload: Record<string, Object> = {
+      'query': query,
+      'count': count,
+      'need_content': true
+    };
+
+    return this.request('/v1/tools/search', JSON.stringify(payload), 30000)
+      .then((response: JsonResponse) => {
+        if (response.statusCode !== 200) {
+          return DeepSeekTools.fail(`搜索请求失败: ${extractErrorMessage(response.body)}`);
         }
-        return await this.search(query, parsedArgs.count || 5);
-        
-      } else if (type === 'fetch') {
-        const url = parsedArgs.url;
-        if (!url) {
-          return {
-            success: false,
-            error: '抓取缺少 url 参数'
-          };
-        }
-        return await this.fetch(url);
-        
-      } else {
-        return {
-          success: false,
-          error: `未知工具类型: ${type}`
-        };
-      }
-      
-    } catch (error) {
-      return {
-        success: false,
-        error: `参数解析失败: ${(error as Error).message}`
-      };
-    }
+        return this.parseSearchResponse(response.body);
+      })
+      .catch((error: Error) => DeepSeekTools.fail(`搜索失败: ${error.message}`));
   }
-  
-  // 生成工具调用的用户友好摘要(显示在UI上)
-  static getToolCallSummary(type: 'search' | 'fetch', args: string): string {
+
+  private parseSearchResponse(body: string): ToolResult {
+    let root: Record<string, Object>;
     try {
-      const parsedArgs = JSON.parse(args);
-      
-      if (type === 'search') {
-        return `搜索: ${parsedArgs.query || '(无关键词)'}`;
-      } else if (type === 'fetch') {
-        const url = parsedArgs.url || '';
-        // 只显示域名
-        try {
-          const urlObj = new URL(url);
-          return `抓取: ${urlObj.hostname}`;
-        } catch {
-          return `抓取: ${url.substring(0, 50)}`;
-        }
-      }
-      
-      return `执行工具: ${type}`;
-      
-    } catch {
-      return `执行工具: ${type}`;
+      const parsed: Object = JSON.parse(body) as Object;
+      root = toRecord(parsed);
+    } catch (e) {
+      return DeepSeekTools.fail('搜索结果解析失败');
     }
+
+    const rawItems: Object[] | undefined = findResultArray(root);
+    if (rawItems === undefined || rawItems.length === 0) {
+      return DeepSeekTools.ok('未找到相关结果');
+    }
+
+    const sections: string[] = [];
+    let index: number = 1;
+
+    for (const raw of rawItems) {
+      if (!isRecord(raw)) {
+        continue;
+      }
+      const obj: Record<string, Object> = toRecord(raw);
+      const title: string = readString(obj, ['title', 'name']) || '(无标题)';
+      const url: string = readString(obj, ['url', 'link', 'href']) || '';
+      const snippet: string = readString(obj, ['snippet', 'description', 'summary', 'abstract']) || '';
+      const content: string | undefined = readString(obj, ['content', 'text', 'page_content', 'markdown']);
+
+      let section: string = `${index}. ${title}\n   URL: ${url}`;
+      if (snippet.length > 0) {
+        section += `\n   摘要: ${snippet}`;
+      }
+      if (content !== undefined && content.length > 0) {
+        section += `\n   内容:\n${truncate(content, 2000, '...')}`;
+      }
+      sections.push(section);
+      index++;
+    }
+
+    if (sections.length === 0) {
+      return DeepSeekTools.ok('未找到相关结果');
+    }
+    return DeepSeekTools.ok(sections.join('\n\n'));
   }
-  
-  // 生成工具结果的简短摘要(显示在UI上)
+
+  // 抓取网页：给模型返回标题+正文，超长截断
+  fetch(url: string): Promise<ToolResult> {
+    if (!this.isAvailable()) {
+      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，无法使用抓取功能'));
+    }
+
+    const payload: Record<string, Object> = { 'url': url };
+
+    return this.request('/v1/tools/fetch', JSON.stringify(payload), 60000)
+      .then((response: JsonResponse) => {
+        if (response.statusCode !== 200) {
+          return DeepSeekTools.fail(`抓取请求失败: ${extractErrorMessage(response.body)}`);
+        }
+        return this.parseFetchResponse(response.body, url);
+      })
+      .catch((error: Error) => DeepSeekTools.fail(`抓取失败: ${error.message}`));
+  }
+
+  private parseFetchResponse(body: string, url: string): ToolResult {
+    let root: Record<string, Object>;
+    try {
+      const parsed: Object = JSON.parse(body) as Object;
+      root = toRecord(parsed);
+    } catch (e) {
+      return DeepSeekTools.fail('抓取结果解析失败');
+    }
+
+    let source: Record<string, Object> = root;
+    const dataValue: Object | undefined = root['data'];
+    if (readString(root, ['content', 'text', 'markdown', 'html']) === undefined
+      && dataValue !== undefined && isRecord(dataValue)) {
+      source = toRecord(dataValue);
+    }
+
+    const content: string | undefined = readString(source, ['content', 'text', 'markdown', 'html', 'page_content']);
+    if (content === undefined || content.trim().length === 0) {
+      return DeepSeekTools.ok('页面内容为空');
+    }
+
+    const title: string | undefined = readString(source, ['title', 'page_title']);
+    const finalUrl: string = readString(source, ['url', 'link']) || url;
+
+    let text: string = title !== undefined && title.length > 0 ? `标题: ${title}\n` : '';
+    text += `URL: ${finalUrl}\n\n`;
+    text += truncate(content, 8000, '\n\n[内容已截断]');
+
+    return DeepSeekTools.ok(text);
+  }
+
+  // 执行工具调用，返回给模型的结果
+  executeTool(type: ToolType, args: string): Promise<ToolResult> {
+    let parsed: Record<string, Object>;
+    try {
+      const obj: Object = JSON.parse(args) as Object;
+      parsed = toRecord(obj);
+    } catch (e) {
+      return Promise.resolve(DeepSeekTools.fail('工具参数解析失败'));
+    }
+
+    if (type === 'search') {
+      const query: string | undefined = readString(parsed, ['query', 'q', 'keyword']);
+      if (query === undefined || query.trim().length === 0) {
+        return Promise.resolve(DeepSeekTools.fail('搜索缺少 query 参数'));
+      }
+      const count: number = readNumber(parsed, 'count') || 5;
+      return this.search(query, count);
+    }
+
+    if (type === 'fetch') {
+      const url: string | undefined = readString(parsed, ['url', 'link', 'href']);
+      if (url === undefined || url.trim().length === 0) {
+        return Promise.resolve(DeepSeekTools.fail('抓取缺少 url 参数'));
+      }
+      return this.fetch(url);
+    }
+
+    return Promise.resolve(DeepSeekTools.fail(`不支持的工具类型: ${type}`));
+  }
+
+  // 给用户看的工具调用摘要
+  static getToolCallSummary(type: ToolType, args: string): string {
+    let parsed: Record<string, Object> | null = null;
+    try {
+      const obj: Object = JSON.parse(args) as Object;
+      parsed = toRecord(obj);
+    } catch (e) {
+      parsed = null;
+    }
+
+    if (parsed === null) {
+      return type === 'search' ? '搜索' : '抓取网页';
+    }
+
+    if (type === 'search') {
+      const query: string | undefined = readString(parsed, ['query', 'q', 'keyword']);
+      return `搜索: ${query !== undefined ? query : '(无关键词)'}`;
+    }
+
+    const url: string | undefined = readString(parsed, ['url', 'link', 'href']);
+    if (url === undefined || url.length === 0) {
+      return '抓取网页';
+    }
+    return `抓取: ${extractHostname(url)}`;
+  }
+
+  // 给用户看的结果摘要
   static getResultSummary(result: ToolResult): string {
     if (!result.success) {
-      return `失败: ${result.error || '未知错误'}`;
+      return `失败: ${result.error !== undefined ? result.error : '未知错误'}`;
     }
-    
-    if (!result.data) {
+    if (result.data === undefined || result.data.length === 0) {
       return '完成';
     }
-    
-    // 显示前100个字符
-    const preview = result.data.length > 100 
-      ? result.data.substring(0, 100) + '...' 
-      : result.data;
-    
-    return preview.replace(/\n/g, ' ');
+    return truncate(result.data, 100, '...').replace(/\n/g, ' ');
   }
 }

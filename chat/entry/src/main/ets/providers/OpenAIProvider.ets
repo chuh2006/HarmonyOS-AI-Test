@@ -1,363 +1,508 @@
-import { httpStreamRequest } from '../services/HttpStream';
 import {
   Message,
   ModelConfig,
   StreamEvent,
   ToolCall,
   ProviderSettings,
-  ChatError
+  ChatError,
+  OpenAIStreamProtocolData,
+  StreamProtocolData,
+  TokenUsage
 } from '../types/Types';
-import { StreamChatCallbacks } from './DeepSeekProvider';
+import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
+import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
-// OpenAI Responses API 请求
-interface OpenAIRequest {
-  model: string;
-  input: OpenAIInput;
-  stream: boolean;
-  reasoning?: {
-    effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-    mode?: 'standard' | 'pro';
-  };
-  service_tier?: 'auto' | 'fast' | 'ultrafast';
-  tools?: OpenAITool[];
-  store?: boolean;
+// ===== Responses API 请求结构 =====
+
+// 消息内容Part
+export interface ResponsesMessageContent {
+  type: string; // 'input_text' | 'output_text'
+  text: string;
 }
 
-type OpenAIInput = string | OpenAIInputMessage[];
+// 思考摘要Part
+export interface ResponsesSummaryPart {
+  type: string; // 'summary_text'
+  text: string;
+}
 
-interface OpenAIInputMessage {
-  role: 'user' | 'assistant' | 'system' | 'tool';
-  content: string | OpenAIContentPart[];
+// 输入项：message / reasoning / function_call / function_call_output
+// 用单一接口+可选字段表达(ArkTS不支持对象字面量联合类型)
+export interface ResponsesInputItem {
+  type: string;
+  // message
+  role?: string;
+  content?: ResponsesMessageContent[];
+  // reasoning (无状态回传加密思考内容)
+  id?: string;
+  encrypted_content?: string;
+  summary?: ResponsesSummaryPart[];
+  // function_call
+  call_id?: string;
   name?: string;
-  tool_call_id?: string;
+  arguments?: string;
+  // function_call_output
+  output?: string;
 }
 
-interface OpenAIContentPart {
-  type: 'text' | 'tool_call' | 'tool_result';
-  text?: string;
-  tool_call?: any;
-  tool_result?: any;
+export interface ResponsesReasoningConfig {
+  effort?: string; // low/medium/high/xhigh/max
+  mode?: string;   // standard/pro
+  summary?: string; // 'auto' - TASK.md要求请求摘要
 }
 
-interface OpenAITool {
-  type: 'function';
+export interface ResponsesFunctionParametersProperty {
+  type: string;
+  description: string;
+}
+
+export interface ResponsesFunctionParametersProperties {
+  query?: ResponsesFunctionParametersProperty;
+  url?: ResponsesFunctionParametersProperty;
+}
+
+export interface ResponsesFunctionParameters {
+  type: string;
+  properties: ResponsesFunctionParametersProperties;
+  required: string[];
+}
+
+export interface ResponsesTool {
+  type: string; // 'function'
   name: string;
   description: string;
-  parameters: any;
+  parameters: ResponsesFunctionParameters;
 }
 
-// OpenAI流式响应事件
-interface OpenAIStreamEvent {
-  type: string;
-  response?: {
-    id: string;
-    output: any[];
-    usage?: {
-      input_tokens: number;
-      output_tokens: number;
-    };
-  };
-  item?: any;
+export interface OpenAIRequest {
+  model: string;
+  input: ResponsesInputItem[];
+  stream: boolean;
+  store: boolean;               // TASK.md: 必须使用无状态API
+  include: string[];            // 官方要求: 无状态时须显式请求encrypted_content
+  reasoning?: ResponsesReasoningConfig;
+  service_tier?: string;        // fast/ultrafast速度模式
+  max_output_tokens?: number;
+  tools?: ResponsesTool[];
+}
+
+// ===== 流式事件结构 =====
+
+export interface ResponsesStreamItem {
+  type?: string;
+  id?: string;
+  call_id?: string;
+  name?: string;
+  arguments?: string;
+  encrypted_content?: string;
+  summary?: ResponsesSummaryPart[];
+  role?: string;
+  content?: ResponsesMessageContent[];
+}
+
+export interface ResponsesStreamUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
+export interface ResponsesStreamResponse {
+  id?: string;
+  status?: string;
+  output?: ResponsesStreamItem[];
+  usage?: ResponsesStreamUsage;
+  error?: ErrorBodyJson;
+}
+
+export interface ErrorBodyJson {
+  message?: string;
+  type?: string;
+}
+
+export interface ResponsesStreamEventJson {
+  type?: string;
+  response?: ResponsesStreamResponse;
+  item?: ResponsesStreamItem;
   delta?: string;
-  content_index?: number;
   output_index?: number;
-  part?: any;
-  error?: {
-    message: string;
-    type: string;
-  };
+  error?: ErrorBodyJson;
 }
 
-export class OpenAIProvider {
-  private settings: ProviderSettings;
+// 工具调用累加状态
+interface PendingFunctionCall {
+  callId: string;
+  name: string;
+  argsBuffer: string;
+}
+
+export class OpenAIProvider implements ChatProvider {
+  private apiKey: string;
   private baseUrl: string;
-  
+
   constructor(settings: ProviderSettings) {
-    this.settings = settings;
-    this.baseUrl = settings.baseUrl || 'https://api.openai.com';
+    this.apiKey = settings.apiKey;
+    this.baseUrl = settings.baseUrl !== undefined && settings.baseUrl.length > 0
+      ? settings.baseUrl
+      : 'https://api.openai.com';
   }
-  
-  // 转换消息为OpenAI格式
-  private convertMessages(messages: Message[]): OpenAIInputMessage[] {
-    const result: OpenAIInputMessage[] = [];
-    
+
+  // 转换消息为Responses API输入项
+  // 按官方要求回传reasoning.encrypted_content，保持顺序:
+  // reasoning → function_call → function_call_output → message
+  private convertMessages(messages: Message[]): ResponsesInputItem[] {
+    const result: ResponsesInputItem[] = [];
+
     for (const msg of messages) {
+      if (msg.role === 'system') {
+        const sysContent: ResponsesMessageContent = { type: 'input_text', text: msg.content };
+        const sysItem: ResponsesInputItem = {
+          type: 'message',
+          role: 'system',
+          content: [sysContent]
+        };
+        result.push(sysItem);
+        continue;
+      }
+
       if (msg.role === 'tool') {
-        // 工具结果消息
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
+        // 工具结果 → function_call_output
+        if (msg.toolCalls !== undefined) {
           for (const tc of msg.toolCalls) {
-            if (tc.result) {
-              result.push({
-                role: 'tool',
-                tool_call_id: tc.id,
-                content: tc.result
-              });
+            const outputText: string = tc.result !== undefined
+              ? tc.result
+              : (tc.error !== undefined ? `工具执行失败: ${tc.error}` : '');
+            const outItem: ResponsesInputItem = {
+              type: 'function_call_output',
+              call_id: tc.id,
+              output: outputText
+            };
+            result.push(outItem);
+          }
+        }
+        continue;
+      }
+
+      if (msg.role === 'assistant') {
+        // 回传加密思考内容(无状态模式必需)
+        if (msg.protocolData !== undefined && msg.protocolData.openai !== undefined) {
+          const pd = msg.protocolData.openai;
+          if (pd.encryptedContent !== undefined && pd.encryptedContent.length > 0) {
+            const reasoningItem: ResponsesInputItem = {
+              type: 'reasoning',
+              encrypted_content: pd.encryptedContent,
+              summary: []
+            };
+            if (pd.responseId !== undefined) {
+              reasoningItem.id = pd.responseId;
             }
+            result.push(reasoningItem);
           }
         }
-      } else {
-        const content: OpenAIContentPart[] = [];
-        
-        // 添加文本内容
-        if (msg.content) {
-          content.push({
-            type: 'text',
-            text: msg.content
-          });
-        }
-        
-        // 添加工具调用
-        if (msg.toolCalls && msg.toolCalls.length > 0) {
+
+        // 工具调用 → function_call
+        if (msg.toolCalls !== undefined) {
           for (const tc of msg.toolCalls) {
-            content.push({
-              type: 'tool_call',
-              tool_call: {
-                id: tc.id,
-                type: 'function',
-                function: {
-                  name: tc.type,
-                  arguments: tc.arguments
-                }
-              }
-            });
+            const fcItem: ResponsesInputItem = {
+              type: 'function_call',
+              call_id: tc.id,
+              name: tc.type,
+              arguments: tc.arguments
+            };
+            result.push(fcItem);
           }
         }
-        
-        if (content.length > 0) {
-          result.push({
-            role: msg.role as 'user' | 'assistant' | 'system',
-            content: content.length === 1 && content[0].type === 'text' 
-              ? content[0].text! 
-              : content
-          });
+
+        // 文本 → message
+        if (msg.content.length > 0) {
+          const textContent: ResponsesMessageContent = { type: 'output_text', text: msg.content };
+          const msgItem: ResponsesInputItem = {
+            type: 'message',
+            role: 'assistant',
+            content: [textContent]
+          };
+          result.push(msgItem);
         }
+        continue;
+      }
+
+      // user
+      if (msg.content.length > 0) {
+        const userContent: ResponsesMessageContent = { type: 'input_text', text: msg.content };
+        const userItem: ResponsesInputItem = {
+          type: 'message',
+          role: 'user',
+          content: [userContent]
+        };
+        result.push(userItem);
       }
     }
-    
+
     return result;
   }
-  
-  // 获取工具定义
-  private getToolDefinitions(): OpenAITool[] {
-    return [
-      {
-        type: 'function',
-        name: 'search',
-        description: '搜索网页获取信息',
-        parameters: {
-          type: 'object',
-          properties: {
-            query: {
-              type: 'string',
-              description: '搜索关键词'
-            }
-          },
-          required: ['query']
-        }
-      },
-      {
-        type: 'function',
-        name: 'fetch',
-        description: '抓取指定网页的内容',
-        parameters: {
-          type: 'object',
-          properties: {
-            url: {
-              type: 'string',
-              description: '要抓取的网页URL'
-            }
-          },
-          required: ['url']
-        }
-      }
-    ];
+
+  private getToolDefinitions(): ResponsesTool[] {
+    const queryProp: ResponsesFunctionParametersProperty = { type: 'string', description: '搜索关键词' };
+    const searchProps: ResponsesFunctionParametersProperties = { query: queryProp };
+    const searchParams: ResponsesFunctionParameters = {
+      type: 'object',
+      properties: searchProps,
+      required: ['query']
+    };
+    const searchTool: ResponsesTool = {
+      type: 'function',
+      name: 'search',
+      description: '按关键词搜索网页，返回标题、链接与摘要',
+      parameters: searchParams
+    };
+
+    const urlProp: ResponsesFunctionParametersProperty = { type: 'string', description: '要抓取的网页完整URL' };
+    const fetchProps: ResponsesFunctionParametersProperties = { url: urlProp };
+    const fetchParams: ResponsesFunctionParameters = {
+      type: 'object',
+      properties: fetchProps,
+      required: ['url']
+    };
+    const fetchTool: ResponsesTool = {
+      type: 'function',
+      name: 'fetch',
+      description: '抓取单个网页，以Markdown文本返回页面内容',
+      parameters: fetchParams
+    };
+
+    return [searchTool, fetchTool];
   }
-  
-  // 流式请求
+
   streamChat(
     messages: Message[],
     config: ModelConfig,
     callbacks: StreamChatCallbacks,
-    abortSignal?: { aborted: boolean }
+    abortSignal?: AbortSignal
   ): void {
-    const url = `${this.baseUrl}/v1/responses`;
-    
+    const url: string = `${this.baseUrl}/v1/responses`;
+
     const requestBody: OpenAIRequest = {
       model: config.modelId,
       input: this.convertMessages(messages),
-      stream: true,
+      stream: true, // TASK.md: 必须使用流式请求
+      store: false, // TASK.md: 必须使用无状态API
+      include: ['reasoning.encrypted_content'], // 官方要求: 无状态时显式请求加密思考内容
       tools: this.getToolDefinitions(),
-      store: false // 无状态模式
+      max_output_tokens: config.maxTokens !== undefined ? config.maxTokens : 128000
     };
-    
-    // 思考配置
+
+    // 思考配置: effort + mode，并请求摘要(TASK.md: 必须请求摘要)
     if (config.thinkingEnabled && config.thinkingEffort !== 'none') {
-      requestBody.reasoning = {
-        effort: config.thinkingEffort as 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+      const reasoning: ResponsesReasoningConfig = {
+        effort: config.thinkingEffort,
+        summary: 'auto'
       };
-      
-      if (config.reasoningMode) {
-        requestBody.reasoning.mode = config.reasoningMode;
+      if (config.reasoningMode !== undefined) {
+        reasoning.mode = config.reasoningMode;
       }
+      requestBody.reasoning = reasoning;
     }
-    
-    // 速度模式配置(实际功能)
-    if (config.speedMode && config.speedMode !== 'normal') {
-      requestBody.service_tier = config.speedMode as 'fast' | 'ultrafast';
+
+    // 速度模式: TASK.md要求对支持的模型允许Fast/Ultrafast
+    if (config.speedMode !== undefined && config.speedMode !== 'normal') {
+      requestBody.service_tier = config.speedMode;
     }
-    
-    let currentToolCall: Partial<ToolCall> | null = null;
-    let toolCallArgs = '';
-    let responseId = '';
-    let encryptedContent = '';
-    
+
+    // 流式解析状态
+    const pendingCalls: PendingFunctionCall[] = [];
+    let responseId: string = '';
+    let encryptedContent: string = '';
+    let completed: boolean = false;
+
+    const emitComplete = (): void => {
+      if (completed) {
+        return;
+      }
+      completed = true;
+      const oaData: OpenAIStreamProtocolData = {
+        responseId: responseId.length > 0 ? responseId : undefined,
+        encryptedContent: encryptedContent.length > 0 ? encryptedContent : undefined
+      };
+      const proto: StreamProtocolData = { openai: oaData };
+      const event: StreamEvent = { type: 'complete', protocolData: proto };
+      callbacks.onEvent(event);
+    };
+
     httpStreamRequest(
       {
-        url,
+        url: url,
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.settings.apiKey}`
+          'Authorization': `Bearer ${this.apiKey}`
         },
         body: JSON.stringify(requestBody),
-        timeout: 300000
+        timeout: 300000,
+        provider: 'openai'
       },
       {
         onData: (data: string) => {
-          if (abortSignal?.aborted) {
+          if (completed) {
             return;
           }
-          
-          if (data === '[DONE]') {
+          if (data.trim().length === 0 || data.trim() === '[DONE]') {
             return;
           }
-          
+
+          let evt: ResponsesStreamEventJson;
           try {
-            const event: OpenAIStreamEvent = JSON.parse(data);
-            
-            // 处理错误
-            if (event.error) {
-              callbacks.onEvent({
-                type: 'error',
-                error: event.error.message
-              });
-              return;
-            }
-            
-            // 记录响应ID
-            if (event.response?.id) {
-              responseId = event.response.id;
-            }
-            
-            // 处理不同类型的事件
-            switch (event.type) {
-              case 'response.output_item.added':
-                if (event.item?.type === 'function_call') {
-                  currentToolCall = {
-                    id: event.item.id || '',
-                    type: event.item.name as 'search' | 'fetch',
-                    arguments: '',
-                    status: 'pending'
-                  };
-                  toolCallArgs = '';
-                  callbacks.onEvent({
-                    type: 'tool_call_start',
-                    toolCall: currentToolCall
-                  });
-                }
-                break;
-                
-              case 'response.summary_text.delta':
-                if (event.delta) {
-                  callbacks.onEvent({
-                    type: 'thinking_delta',
-                    data: event.delta
-                  });
-                }
-                break;
-                
-              case 'response.output_text.delta':
-                if (event.delta) {
-                  callbacks.onEvent({
-                    type: 'content_delta',
-                    data: event.delta
-                  });
-                }
-                break;
-                
-              case 'response.function_call_arguments.delta':
-                if (event.delta && currentToolCall) {
-                  toolCallArgs += event.delta;
-                  callbacks.onEvent({
-                    type: 'tool_call_delta',
-                    toolCall: { ...currentToolCall, arguments: toolCallArgs }
-                  });
-                }
-                break;
-                
-              case 'response.function_call_arguments.done':
-                if (currentToolCall) {
-                  currentToolCall.arguments = toolCallArgs;
-                  currentToolCall.status = 'pending';
-                  callbacks.onEvent({
-                    type: 'tool_call_end',
-                    toolCall: currentToolCall
-                  });
-                  currentToolCall = null;
-                  toolCallArgs = '';
-                }
-                break;
-                
-              case 'response.completed':
-                // 提取加密的reasoning内容用于后续请求
-                if (event.response?.output) {
-                  for (const item of event.response.output) {
-                    if (item.type === 'reasoning' && item.encrypted_content) {
-                      encryptedContent = item.encrypted_content;
-                    }
-                  }
-                }
-                
-                if (event.response?.usage) {
-                  callbacks.onEvent({
-                    type: 'usage',
-                    usage: {
-                      inputTokens: event.response.usage.input_tokens,
-                      outputTokens: event.response.usage.output_tokens
-                    }
-                  });
-                }
-                
-                callbacks.onEvent({
-                  type: 'complete',
-                  protocolData: {
-                    responseId,
-                    encryptedContent: encryptedContent || undefined,
-                    output: event.response?.output
-                  }
-                });
-                break;
-            }
+            evt = JSON.parse(data) as ResponsesStreamEventJson;
           } catch (e) {
-            console.error('OpenAI stream parse error:', e);
+            return;
+          }
+
+          if (evt.error !== undefined && evt.error.message !== undefined) {
+            const errEvent: StreamEvent = { type: 'error', error: evt.error.message };
+            callbacks.onEvent(errEvent);
+            return;
+          }
+
+          if (evt.response !== undefined && evt.response.id !== undefined) {
+            responseId = evt.response.id;
+          }
+
+          const evtType: string = evt.type !== undefined ? evt.type : '';
+
+          // 新输出项: function_call开始
+          if (evtType === 'response.output_item.added') {
+            const item: ResponsesStreamItem | undefined = evt.item;
+            if (item !== undefined && item.type === 'function_call') {
+              const pending: PendingFunctionCall = {
+                callId: item.call_id !== undefined ? item.call_id : '',
+                name: item.name !== undefined ? item.name : '',
+                argsBuffer: ''
+              };
+              pendingCalls.push(pending);
+              const tc: ToolCall = {
+                id: pending.callId,
+                type: pending.name === 'fetch' ? 'fetch' : 'search',
+                arguments: '',
+                status: 'running'
+              };
+              const startEvent: StreamEvent = { type: 'tool_call_start', toolCall: tc };
+              callbacks.onEvent(startEvent);
+            }
+            return;
+          }
+
+          // 思考摘要增量(TASK.md: 实时展示summary)
+          if (evtType === 'response.summary_text.delta' || evtType === 'response.summary.delta') {
+            if (evt.delta !== undefined && evt.delta.length > 0) {
+              const thinkEvent: StreamEvent = { type: 'thinking_delta', data: evt.delta };
+              callbacks.onEvent(thinkEvent);
+            }
+            return;
+          }
+
+          // 正文增量(TASK.md: 实时展示content)
+          if (evtType === 'response.output_text.delta' || evtType === 'response.text.delta') {
+            if (evt.delta !== undefined && evt.delta.length > 0) {
+              const contentEvent: StreamEvent = { type: 'content_delta', data: evt.delta };
+              callbacks.onEvent(contentEvent);
+            }
+            return;
+          }
+
+          // 工具参数增量
+          if (evtType === 'response.function_call_arguments.delta') {
+            if (evt.delta !== undefined && pendingCalls.length > 0) {
+              const last: PendingFunctionCall = pendingCalls[pendingCalls.length - 1];
+              last.argsBuffer += evt.delta;
+              const tc: ToolCall = {
+                id: last.callId,
+                type: last.name === 'fetch' ? 'fetch' : 'search',
+                arguments: last.argsBuffer,
+                status: 'running'
+              };
+              const deltaEvent: StreamEvent = { type: 'tool_call_delta', toolCall: tc };
+              callbacks.onEvent(deltaEvent);
+            }
+            return;
+          }
+
+          // 工具参数完成: 此时才执行
+          if (evtType === 'response.function_call_arguments.done') {
+            if (pendingCalls.length > 0) {
+              const last: PendingFunctionCall = pendingCalls.pop() as PendingFunctionCall;
+              const finalArgs: string = evt.delta !== undefined && evt.delta.length > 0
+                ? evt.delta
+                : last.argsBuffer;
+              const tc: ToolCall = {
+                id: last.callId,
+                type: last.name === 'fetch' ? 'fetch' : 'search',
+                arguments: finalArgs.length > 0 ? finalArgs : '{}',
+                status: 'pending'
+              };
+              const endEvent: StreamEvent = { type: 'tool_call_end', toolCall: tc };
+              callbacks.onEvent(endEvent);
+            }
+            return;
+          }
+
+          // 输出项完成: 捕获reasoning项的encrypted_content(工具调用后继续对话必需)
+          if (evtType === 'response.output_item.done') {
+            const item: ResponsesStreamItem | undefined = evt.item;
+            if (item !== undefined && item.type === 'reasoning') {
+              if (item.encrypted_content !== undefined && item.encrypted_content.length > 0) {
+                encryptedContent = item.encrypted_content;
+              }
+            }
+            return;
+          }
+
+          // 使用量
+          if (evtType === 'response.completed' || evtType === 'response.incomplete') {
+            if (evt.response !== undefined) {
+              // 从最终输出兜底提取encrypted_content
+              if (evt.response.output !== undefined) {
+                for (const item of evt.response.output) {
+                  if (item.type === 'reasoning' && item.encrypted_content !== undefined
+                    && item.encrypted_content.length > 0) {
+                    encryptedContent = item.encrypted_content;
+                  }
+                }
+              }
+              if (evt.response.usage !== undefined) {
+                const usage: TokenUsage = {
+                  inputTokens: evt.response.usage.input_tokens,
+                  outputTokens: evt.response.usage.output_tokens
+                };
+                const usageEvent: StreamEvent = { type: 'usage', usage: usage };
+                callbacks.onEvent(usageEvent);
+              }
+              if (evt.response.error !== undefined && evt.response.error.message !== undefined) {
+                const errEvent: StreamEvent = { type: 'error', error: evt.response.error.message };
+                callbacks.onEvent(errEvent);
+                return;
+              }
+            }
+            emitComplete();
+            return;
+          }
+
+          if (evtType === 'response.failed') {
+            const errMsg: string = evt.response !== undefined && evt.response.error !== undefined
+              && evt.response.error.message !== undefined
+              ? evt.response.error.message as string
+              : '请求失败';
+            const errEvent: StreamEvent = { type: 'error', error: errMsg };
+            callbacks.onEvent(errEvent);
           }
         },
-        
+
         onComplete: () => {
+          emitComplete();
           callbacks.onComplete();
         },
-        
-        onError: (error: Error) => {
+
+        onError: (error: ChatError) => {
           callbacks.onError(error);
         }
       },
       abortSignal
-    ).catch((error: Error) => {
-      if (error instanceof ChatError) {
-        callbacks.onError(error);
-      } else {
-        callbacks.onError(ChatError.networkError(error.message));
-      }
-    });
+    );
   }
 }

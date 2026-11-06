@@ -274,11 +274,12 @@ export class ChatError extends Error {
   }
 }
 
-// 内置模型列表
+// 内置模型列表(模型名严格按照TASK.md要求)
 export function getBuiltinModels(): ModelInfo[] {
   const models: ModelInfo[] = [];
 
-  // DeepSeek
+  // DeepSeek: deepseek-flash、deepseek-v4-pro
+  // 思考强度: low/high/max，none表示关闭
   const dsCap: ModelCapabilities = {
     supportsThinking: true,
     supportsToolCall: true,
@@ -287,43 +288,41 @@ export function getBuiltinModels(): ModelInfo[] {
     maxTokens: 128000
   };
   const dsFlash: ModelInfo = {
-    id: 'deepseek-chat',
-    name: 'DeepSeek Chat',
+    id: 'deepseek-flash',
+    name: 'DeepSeek Flash',
     provider: 'deepseek',
     capabilities: dsCap
   };
   models.push(dsFlash);
-  const dsReasonerCap: ModelCapabilities = {
-    supportsThinking: true,
-    supportsToolCall: true,
-    supportsStream: true,
-    thinkingEfforts: ['none', 'low', 'high', 'max'],
-    maxTokens: 128000
-  };
-  const dsReasoner: ModelInfo = {
-    id: 'deepseek-reasoner',
-    name: 'DeepSeek Reasoner',
+  const dsPro: ModelInfo = {
+    id: 'deepseek-v4-pro',
+    name: 'DeepSeek V4 Pro',
     provider: 'deepseek',
-    capabilities: dsReasonerCap
+    capabilities: dsCap
   };
-  models.push(dsReasoner);
+  models.push(dsPro);
 
-  // OpenAI
+  // OpenAI: gpt-6-astra、gpt-6.1-sol、gpt-6.1-terra、gpt-6-luna
+  // 思考强度: low/medium/high/xhigh/max，none表示关闭
   const gptCap: ModelCapabilities = {
     supportsThinking: true,
     supportsToolCall: true,
     supportsStream: true,
-    thinkingEfforts: ['none', 'low', 'medium', 'high', 'max'],
+    thinkingEfforts: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
     reasoningModes: ['standard', 'pro'],
     speedModes: ['normal', 'fast', 'ultrafast'],
     maxTokens: 128000
   };
-  const gpt1: ModelInfo = { id: 'gpt-5', name: 'GPT-5', provider: 'openai', capabilities: gptCap };
-  models.push(gpt1);
-  const gpt2: ModelInfo = { id: 'gpt-5-mini', name: 'GPT-5 Mini', provider: 'openai', capabilities: gptCap };
-  models.push(gpt2);
+  const gptAstra: ModelInfo = { id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai', capabilities: gptCap };
+  models.push(gptAstra);
+  const gptSol: ModelInfo = { id: 'gpt-6.1-sol', name: 'GPT-6.1 Sol', provider: 'openai', capabilities: gptCap };
+  models.push(gptSol);
+  const gptTerra: ModelInfo = { id: 'gpt-6.1-terra', name: 'GPT-6.1 Terra', provider: 'openai', capabilities: gptCap };
+  models.push(gptTerra);
+  const gptLuna: ModelInfo = { id: 'gpt-6-luna', name: 'GPT-6 Luna', provider: 'openai', capabilities: gptCap };
+  models.push(gptLuna);
 
-  // Mercury
+  // Mercury: mercury-3，支持扩散输出(默认开启)
   const mercuryCap: ModelCapabilities = {
     supportsThinking: true,
     supportsToolCall: true,
@@ -333,14 +332,14 @@ export function getBuiltinModels(): ModelInfo[] {
     maxTokens: 65536
   };
   const mercury: ModelInfo = {
-    id: 'mercury-coder',
-    name: 'Mercury Coder',
+    id: 'mercury-3',
+    name: 'Mercury 3',
     provider: 'mercury',
     capabilities: mercuryCap
   };
   models.push(mercury);
 
-  // Gemini
+  // Gemini: gemini-3.8-flash、gemini-4-argon
   const geminiCap: ModelCapabilities = {
     supportsThinking: true,
     supportsToolCall: true,
@@ -348,20 +347,20 @@ export function getBuiltinModels(): ModelInfo[] {
     thinkingEfforts: ['none', 'low', 'medium', 'high'],
     maxTokens: 65536
   };
-  const gemini1: ModelInfo = {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash',
+  const geminiFlash: ModelInfo = {
+    id: 'gemini-3.8-flash',
+    name: 'Gemini 3.8 Flash',
     provider: 'gemini',
     capabilities: geminiCap
   };
-  models.push(gemini1);
-  const gemini2: ModelInfo = {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro',
+  models.push(geminiFlash);
+  const geminiArgon: ModelInfo = {
+    id: 'gemini-4-argon',
+    name: 'Gemini 4 Argon',
     provider: 'gemini',
     capabilities: geminiCap
   };
-  models.push(gemini2);
+  models.push(geminiArgon);
 
   return models;
 }
@@ -433,11 +432,41 @@ export function createDefaultSettings(): AppSettings {
   return settings;
 }
 
+// ProviderSettingsMap 是显式字段结构，按 id 读写需要分支
+export function getProviderSettings(map: ProviderSettingsMap, id: ProviderId): ProviderSettings {
+  if (id === 'deepseek') {
+    return map.deepseek;
+  }
+  if (id === 'openai') {
+    return map.openai;
+  }
+  if (id === 'mercury') {
+    return map.mercury;
+  }
+  return map.gemini;
+}
+
+export function setProviderSettings(map: ProviderSettingsMap, id: ProviderId, settings: ProviderSettings): void {
+  if (id === 'deepseek') {
+    map.deepseek = settings;
+    return;
+  }
+  if (id === 'openai') {
+    map.openai = settings;
+    return;
+  }
+  if (id === 'mercury') {
+    map.mercury = settings;
+    return;
+  }
+  map.gemini = settings;
+}
+
 // 创建默认模型配置
 export function createDefaultModelConfig(): ModelConfig {
   const config: ModelConfig = {
     providerId: 'deepseek',
-    modelId: 'deepseek-chat',
+    modelId: 'deepseek-flash',
     thinkingEnabled: false,
     thinkingEffort: 'none',
     diffusionEnabled: true

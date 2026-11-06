@@ -1,325 +1,412 @@
-import dataPreferences from '@ohos.data.preferences';
+import { preferences } from '@kit.ArkData';
 import { common } from '@kit.AbilityKit';
 import {
-  Session,
-  Message,
   AppSettings,
+  Message,
+  MessageStatus,
   ModelConfig,
+  ProtocolData,
+  ProviderId,
   ProviderSettings,
-  ProviderId
+  Session,
+  ToolCall,
+  createDefaultSettings,
+  generateId,
+  setProviderSettings
 } from '../types/Types';
 
-// 存储键
-const STORAGE_KEYS = {
-  SETTINGS: 'app_settings',
-  SESSIONS: 'chat_sessions',
-  CURRENT_SESSION: 'current_session_id'
-};
+const STORE_NAME: string = 'chat_store';
+const SETTINGS_KEY: string = 'app_settings';
+const SESSIONS_KEY: string = 'chat_sessions';
+const CURRENT_SESSION_KEY: string = 'current_session_id';
+const MAX_SESSIONS: number = 50;
+const DEFAULT_TITLE: string = '新对话';
+
+// 消息增量更新字段
+export interface MessagePatch {
+  content?: string;
+  thinking?: string;
+  status?: MessageStatus;
+  toolCalls?: ToolCall[];
+  error?: string;
+  protocolData?: ProtocolData;
+}
+
+// 会话增量更新字段
+export interface SessionPatch {
+  title?: string;
+  messages?: Message[];
+  modelConfig?: ModelConfig;
+}
+
+// ProviderSettingsMap 的读写helper在 Types 中，这里直接复用
+function toError(value: Object | Error, fallback: string): Error {
+  if (value instanceof Error) {
+    return value;
+  }
+  return new Error(fallback);
+}
+
+function cloneMessage(message: Message): Message {
+  const copy: Message = {
+    id: message.id,
+    role: message.role,
+    content: message.content,
+    thinking: message.thinking,
+    status: message.status,
+    toolCalls: message.toolCalls,
+    timestamp: message.timestamp,
+    error: message.error,
+    protocolData: message.protocolData
+  };
+  return copy;
+}
+
+export function applyMessagePatch(message: Message, patch: MessagePatch): Message {
+  const copy: Message = cloneMessage(message);
+  if (patch.content !== undefined) {
+    copy.content = patch.content;
+  }
+  if (patch.thinking !== undefined) {
+    copy.thinking = patch.thinking;
+  }
+  if (patch.status !== undefined) {
+    copy.status = patch.status;
+  }
+  if (patch.toolCalls !== undefined) {
+    copy.toolCalls = patch.toolCalls;
+  }
+  if (patch.error !== undefined) {
+    copy.error = patch.error;
+  }
+  if (patch.protocolData !== undefined) {
+    copy.protocolData = patch.protocolData;
+  }
+  return copy;
+}
+
+function cloneSession(session: Session): Session {
+  const copy: Session = {
+    id: session.id,
+    title: session.title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    messages: session.messages,
+    modelConfig: session.modelConfig
+  };
+  return copy;
+}
+
+function applySessionPatch(session: Session, patch: SessionPatch): Session {
+  const copy: Session = cloneSession(session);
+  if (patch.title !== undefined) {
+    copy.title = patch.title;
+  }
+  if (patch.messages !== undefined) {
+    copy.messages = patch.messages;
+  }
+  if (patch.modelConfig !== undefined) {
+    copy.modelConfig = patch.modelConfig;
+  }
+  copy.updatedAt = Date.now();
+  return copy;
+}
+
+function readProviderSettings(root: Record<string, Object>, key: string): ProviderSettings {
+  const empty: ProviderSettings = { apiKey: '' };
+  const value: Object | undefined = root[key];
+  if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return empty;
+  }
+  const record: Record<string, Object> = value as Record<string, Object>;
+  const keyValue: Object | undefined = record['apiKey'];
+  const baseUrlValue: Object | undefined = record['baseUrl'];
+  const settings: ProviderSettings = {
+    apiKey: keyValue !== undefined && typeof keyValue === 'string' ? keyValue as string : '',
+    baseUrl: baseUrlValue !== undefined && typeof baseUrlValue === 'string' ? baseUrlValue as string : undefined
+  };
+  return settings;
+}
+
+// 读出的 JSON 可能缺字段，逐字段补齐后再返回
+function parseSettings(data: string): AppSettings {
+  const settings: AppSettings = createDefaultSettings();
+  if (data.length === 0) {
+    return settings;
+  }
+  try {
+    const parsed: Object = JSON.parse(data) as Object;
+    const root: Record<string, Object> = parsed as Record<string, Object>;
+
+    const providersValue: Object | undefined = root['providers'];
+    if (providersValue !== undefined && providersValue !== null && typeof providersValue === 'object'
+      && !Array.isArray(providersValue)) {
+      const providers: Record<string, Object> = providersValue as Record<string, Object>;
+      settings.providers.deepseek = readProviderSettings(providers, 'deepseek');
+      settings.providers.openai = readProviderSettings(providers, 'openai');
+      settings.providers.mercury = readProviderSettings(providers, 'mercury');
+      settings.providers.gemini = readProviderSettings(providers, 'gemini');
+    }
+
+    const defaultProvider: Object | undefined = root['defaultProvider'];
+    if (defaultProvider !== undefined && typeof defaultProvider === 'string') {
+      settings.defaultProvider = defaultProvider as ProviderId;
+    }
+    const defaultModel: Object | undefined = root['defaultModel'];
+    if (defaultModel !== undefined && typeof defaultModel === 'string') {
+      settings.defaultModel = defaultModel as string;
+    }
+  } catch (error) {
+    return createDefaultSettings();
+  }
+  return settings;
+}
 
 export class Store {
-  private preferences: dataPreferences.Preferences | null = null;
-  private context: common.UIAbilityContext;
-  
-  constructor(context: common.UIAbilityContext) {
+  private prefs: preferences.Preferences | null = null;
+  private context: common.Context;
+
+  constructor(context: common.Context) {
     this.context = context;
   }
-  
-  // 初始化存储
+
   async init(): Promise<void> {
     try {
-      this.preferences = await dataPreferences.getPreferences(this.context, 'chat_store');
+      this.prefs = await preferences.getPreferences(this.context, STORE_NAME);
     } catch (error) {
-      console.error('Failed to init preferences:', error);
-      throw error;
+      throw toError(error as Object, '初始化本地存储失败');
     }
   }
-  
-  // 确保已初始化
-  private ensureInit(): void {
-    if (!this.preferences) {
-      throw new Error('Store not initialized. Call init() first.');
+
+  private ensurePrefs(): preferences.Preferences {
+    if (this.prefs === null) {
+      throw new Error('Store 未初始化，请先调用 init()');
     }
+    return this.prefs;
   }
-  
-  // === 设置相关 ===
-  
-  // 获取应用设置
+
+  // === 设置 ===
+
   async getSettings(): Promise<AppSettings> {
-    this.ensureInit();
-    
+    const prefs: preferences.Preferences = this.ensurePrefs();
     try {
-      const data = await this.preferences!.get(STORAGE_KEYS.SETTINGS, '{}') as string;
-      const settings = JSON.parse(data) as AppSettings;
-      
-      // 确保所有provider都有设置
-      if (!settings.providers) {
-        settings.providers = {} as Record<ProviderId, ProviderSettings>;
-      }
-      
-      const providers: ProviderId[] = ['deepseek', 'openai', 'mercury', 'gemini'];
-      for (const provider of providers) {
-        if (!settings.providers[provider]) {
-          settings.providers[provider] = { apiKey: '' };
-        }
-      }
-      
-      return settings;
-      
+      const data: string = await prefs.get(SETTINGS_KEY, '') as string;
+      return parseSettings(data);
     } catch (error) {
-      console.error('Failed to get settings:', error);
-      return {
-        providers: {
-          deepseek: { apiKey: '' },
-          openai: { apiKey: '' },
-          mercury: { apiKey: '' },
-          gemini: { apiKey: '' }
-        }
-      };
+      console.error(`读取设置失败: ${toError(error as Object, '未知错误').message}`);
+      return createDefaultSettings();
     }
   }
-  
-  // 保存应用设置
+
+  private async writeValue(key: string, value: string): Promise<void> {
+    const prefs: preferences.Preferences = this.ensurePrefs();
+    try {
+      await prefs.put(key, value);
+      await prefs.flush();
+    } catch (error) {
+      throw toError(error as Object, `写入本地存储失败: ${key}`);
+    }
+  }
+
   async saveSettings(settings: AppSettings): Promise<void> {
-    this.ensureInit();
-    
-    try {
-      await this.preferences!.put(STORAGE_KEYS.SETTINGS, JSON.stringify(settings));
-      await this.preferences!.flush();
-    } catch (error) {
-      console.error('Failed to save settings:', error);
-      throw error;
-    }
+    await this.writeValue(SETTINGS_KEY, JSON.stringify(settings));
   }
-  
-  // 更新单个Provider设置
+
   async updateProviderSettings(providerId: ProviderId, settings: ProviderSettings): Promise<void> {
-    const appSettings = await this.getSettings();
-    appSettings.providers[providerId] = settings;
+    const appSettings: AppSettings = await this.getSettings();
+    setProviderSettings(appSettings.providers, providerId, settings);
     await this.saveSettings(appSettings);
   }
-  
-  // === 会话相关 ===
-  
-  // 获取所有会话
+
+  // === 会话 ===
+
   async getSessions(): Promise<Session[]> {
-    this.ensureInit();
-    
+    const prefs: preferences.Preferences = this.ensurePrefs();
     try {
-      const data = await this.preferences!.get(STORAGE_KEYS.SESSIONS, '[]') as string;
-      const sessions = JSON.parse(data) as Session[];
-      
-      // 按更新时间排序
-      return sessions.sort((a, b) => b.updatedAt - a.updatedAt);
-      
+      const data: string = await prefs.get(SESSIONS_KEY, '[]') as string;
+      const sessions: Session[] = JSON.parse(data) as Session[];
+      sessions.sort((a: Session, b: Session) => b.updatedAt - a.updatedAt);
+      return sessions;
     } catch (error) {
-      console.error('Failed to get sessions:', error);
+      console.error(`读取会话失败: ${toError(error as Object, '未知错误').message}`);
       return [];
     }
   }
-  
-  // 保存所有会话
+
   private async saveSessions(sessions: Session[]): Promise<void> {
-    this.ensureInit();
-    
-    try {
-      await this.preferences!.put(STORAGE_KEYS.SESSIONS, JSON.stringify(sessions));
-      await this.preferences!.flush();
-    } catch (error) {
-      console.error('Failed to save sessions:', error);
-      throw error;
-    }
+    await this.writeValue(SESSIONS_KEY, JSON.stringify(sessions));
   }
-  
-  // 获取单个会话
+
   async getSession(sessionId: string): Promise<Session | null> {
-    const sessions = await this.getSessions();
-    return sessions.find(s => s.id === sessionId) || null;
-  }
-  
-  // 创建新会话
-  async createSession(modelConfig: ModelConfig, title?: string): Promise<Session> {
-    const sessions = await this.getSessions();
-    
-    const newSession: Session = {
-      id: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      title: title || '新对话',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      messages: [],
-      modelConfig
-    };
-    
-    sessions.unshift(newSession);
-    await this.saveSessions(sessions);
-    
-    return newSession;
-  }
-  
-  // 更新会话
-  async updateSession(sessionId: string, updates: Partial<Session>): Promise<void> {
-    const sessions = await this.getSessions();
-    const index = sessions.findIndex(s => s.id === sessionId);
-    
-    if (index === -1) {
-      throw new Error(`Session not found: ${sessionId}`);
+    const sessions: Session[] = await this.getSessions();
+    for (const session of sessions) {
+      if (session.id === sessionId) {
+        return session;
+      }
     }
-    
-    sessions[index] = {
-      ...sessions[index],
-      ...updates,
-      updatedAt: Date.now()
-    };
-    
-    await this.saveSessions(sessions);
+    return null;
   }
-  
-  // 删除会话
+
+  async createSession(modelConfig: ModelConfig, title?: string): Promise<Session> {
+    const sessions: Session[] = await this.getSessions();
+    const now: number = Date.now();
+    const session: Session = {
+      id: generateId('session'),
+      title: title !== undefined && title.length > 0 ? title : DEFAULT_TITLE,
+      createdAt: now,
+      updatedAt: now,
+      messages: [],
+      modelConfig: modelConfig
+    };
+    sessions.unshift(session);
+    await this.saveSessions(sessions);
+    return session;
+  }
+
+  async updateSession(sessionId: string, patch: SessionPatch): Promise<void> {
+    const sessions: Session[] = await this.getSessions();
+    for (let i = 0; i < sessions.length; i++) {
+      if (sessions[i].id === sessionId) {
+        sessions[i] = applySessionPatch(sessions[i], patch);
+        await this.saveSessions(sessions);
+        return;
+      }
+    }
+    throw new Error(`会话不存在: ${sessionId}`);
+  }
+
   async deleteSession(sessionId: string): Promise<void> {
-    const sessions = await this.getSessions();
-    const filtered = sessions.filter(s => s.id !== sessionId);
-    
-    await this.saveSessions(filtered);
-    
-    // 如果删除的是当前会话，清除当前会话ID
-    const currentId = await this.getCurrentSessionId();
+    const sessions: Session[] = await this.getSessions();
+    const kept: Session[] = [];
+    for (const session of sessions) {
+      if (session.id !== sessionId) {
+        kept.push(session);
+      }
+    }
+    await this.saveSessions(kept);
+
+    const currentId: string | null = await this.getCurrentSessionId();
     if (currentId === sessionId) {
       await this.clearCurrentSessionId();
     }
   }
-  
-  // === 消息相关 ===
-  
-  // 添加消息到会话
+
+  // === 消息 ===
+
   async addMessage(sessionId: string, message: Message): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+    const session: Session | null = await this.getSession(sessionId);
+    if (session === null) {
+      throw new Error(`会话不存在: ${sessionId}`);
     }
-    
-    session.messages.push(message);
-    await this.updateSession(sessionId, { messages: session.messages });
+    const messages: Message[] = [];
+    for (const m of session.messages) {
+      messages.push(m);
+    }
+    messages.push(message);
+    await this.updateSession(sessionId, { messages: messages });
   }
-  
-  // 更新消息
-  async updateMessage(sessionId: string, messageId: string, updates: Partial<Message>): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+
+  async updateMessage(sessionId: string, messageId: string, patch: MessagePatch): Promise<void> {
+    const session: Session | null = await this.getSession(sessionId);
+    if (session === null) {
+      throw new Error(`会话不存在: ${sessionId}`);
     }
-    
-    const index = session.messages.findIndex(m => m.id === messageId);
-    if (index === -1) {
-      throw new Error(`Message not found: ${messageId}`);
+    let found: boolean = false;
+    const messages: Message[] = [];
+    for (const message of session.messages) {
+      if (message.id === messageId) {
+        messages.push(applyMessagePatch(message, patch));
+        found = true;
+      } else {
+        messages.push(message);
+      }
     }
-    
-    session.messages[index] = {
-      ...session.messages[index],
-      ...updates
-    };
-    
-    await this.updateSession(sessionId, { messages: session.messages });
+    if (!found) {
+      throw new Error(`消息不存在: ${messageId}`);
+    }
+    await this.updateSession(sessionId, { messages: messages });
   }
-  
-  // 删除消息
+
   async deleteMessage(sessionId: string, messageId: string): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) {
-      throw new Error(`Session not found: ${sessionId}`);
+    const session: Session | null = await this.getSession(sessionId);
+    if (session === null) {
+      throw new Error(`会话不存在: ${sessionId}`);
     }
-    
-    const filtered = session.messages.filter(m => m.id !== messageId);
-    await this.updateSession(sessionId, { messages: filtered });
+    const messages: Message[] = [];
+    for (const message of session.messages) {
+      if (message.id !== messageId) {
+        messages.push(message);
+      }
+    }
+    await this.updateSession(sessionId, { messages: messages });
   }
-  
+
   // === 当前会话 ===
-  
-  // 获取当前会话ID
+
   async getCurrentSessionId(): Promise<string | null> {
-    this.ensureInit();
-    
+    const prefs: preferences.Preferences = this.ensurePrefs();
     try {
-      const id = await this.preferences!.get(STORAGE_KEYS.CURRENT_SESSION, '') as string;
-      return id || null;
+      const id: string = await prefs.get(CURRENT_SESSION_KEY, '') as string;
+      return id.length > 0 ? id : null;
     } catch (error) {
-      console.error('Failed to get current session id:', error);
+      console.error(`读取当前会话失败: ${toError(error as Object, '未知错误').message}`);
       return null;
     }
   }
-  
-  // 设置当前会话ID
+
   async setCurrentSessionId(sessionId: string): Promise<void> {
-    this.ensureInit();
-    
-    try {
-      await this.preferences!.put(STORAGE_KEYS.CURRENT_SESSION, sessionId);
-      await this.preferences!.flush();
-    } catch (error) {
-      console.error('Failed to set current session id:', error);
-      throw error;
-    }
+    await this.writeValue(CURRENT_SESSION_KEY, sessionId);
   }
-  
-  // 清除当前会话ID
+
   async clearCurrentSessionId(): Promise<void> {
-    this.ensureInit();
-    
+    const prefs: preferences.Preferences = this.ensurePrefs();
     try {
-      await this.preferences!.delete(STORAGE_KEYS.CURRENT_SESSION);
-      await this.preferences!.flush();
+      await prefs.delete(CURRENT_SESSION_KEY);
+      await prefs.flush();
     } catch (error) {
-      console.error('Failed to clear current session id:', error);
+      console.error(`清除当前会话失败: ${toError(error as Object, '未知错误').message}`);
     }
   }
-  
-  // === 辅助方法 ===
-  
-  // 自动生成会话标题(基于第一条用户消息)
+
+  // === 辅助 ===
+
+  // 用第一条用户消息作为会话标题
   async generateSessionTitle(sessionId: string): Promise<void> {
-    const session = await this.getSession(sessionId);
-    if (!session) return;
-    
-    // 如果已经有标题且不是默认标题，不修改
-    if (session.title && session.title !== '新对话') {
+    const session: Session | null = await this.getSession(sessionId);
+    if (session === null) {
       return;
     }
-    
-    // 查找第一条用户消息
-    const firstUserMessage = session.messages.find(m => m.role === 'user');
-    if (!firstUserMessage || !firstUserMessage.content) {
+    if (session.title.length > 0 && session.title !== DEFAULT_TITLE) {
       return;
     }
-    
-    // 使用消息的前20个字符作为标题
-    let title = firstUserMessage.content.trim();
-    if (title.length > 20) {
-      title = title.substring(0, 20) + '...';
+    for (const message of session.messages) {
+      if (message.role === 'user' && message.content.trim().length > 0) {
+        const text: string = message.content.trim();
+        const title: string = text.length > 20 ? `${text.substring(0, 20)}...` : text;
+        await this.updateSession(sessionId, { title: title });
+        return;
+      }
     }
-    
-    await this.updateSession(sessionId, { title });
   }
-  
-  // 清理旧会话(保留最近N个)
-  async cleanupOldSessions(keepCount: number = 50): Promise<void> {
-    const sessions = await this.getSessions();
-    
+
+  async cleanupOldSessions(keepCount: number = MAX_SESSIONS): Promise<void> {
+    const sessions: Session[] = await this.getSessions();
     if (sessions.length > keepCount) {
-      const toKeep = sessions.slice(0, keepCount);
-      await this.saveSessions(toKeep);
+      await this.saveSessions(sessions.slice(0, keepCount));
     }
   }
 }
 
-// 全局Store实例(需要在应用启动时初始化)
 let globalStore: Store | null = null;
 
-export function initGlobalStore(context: common.UIAbilityContext): Promise<void> {
+export function initGlobalStore(context: common.Context): Promise<void> {
   globalStore = new Store(context);
   return globalStore.init();
 }
 
 export function getStore(): Store {
-  if (!globalStore) {
-    throw new Error('Store not initialized. Call initGlobalStore() first.');
+  if (globalStore === null) {
+    throw new Error('Store 未初始化，请先调用 initGlobalStore()');
   }
   return globalStore;
 }
