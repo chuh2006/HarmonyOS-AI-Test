@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "MiniChat 主模块"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "MiniChat AI 聊天"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "MiniChat"
     }
   ]
 }
