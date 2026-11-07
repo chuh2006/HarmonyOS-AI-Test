@@ -8,7 +8,7 @@ import {
   ChatError
 } from '../types/Types';
 import { httpStreamRequest, AbortSignal } from '../services/HttpStream';
-import { hasItems, hasText, listOr, numberOr, present, textOr } from '../services/Json';
+import { hasItems, hasText, listOr, numberOr, present, recordOrNull, stringField, textOr } from '../services/Json';
 import { ChatProvider, StreamChatCallbacks } from './IProtocol';
 
 // ===== Chat Completions API 结构 =====
@@ -19,6 +19,7 @@ export interface MercuryFunctionDef {
 }
 
 export interface MercuryToolCallJson {
+  index?: number; // 流式续帧只带 index+arguments，必须靠它归属到同一次调用
   id?: string;
   type?: string;
   function?: MercuryFunctionDef;
@@ -92,6 +93,12 @@ export interface MercuryUsageJson {
   total_tokens?: number;
 }
 
+export interface MercuryErrorJson {
+  message?: string;
+  type?: string;
+  code?: string;
+}
+
 export interface MercuryStreamChunkJson {
   id?: string;
   object?: string;
@@ -99,10 +106,12 @@ export interface MercuryStreamChunkJson {
   model?: string;
   choices?: MercuryChoiceJson[];
   usage?: MercuryUsageJson;
+  error?: MercuryErrorJson;
 }
 
-// 工具调用累加状态(按call id去重，保证同一次调用只执行一次)
+// 工具调用累加状态(按 index/id 归属，保证同一次调用只执行一次)
 interface PendingTool {
+  index: number; // -1 表示服务端没有给 index
   id: string;
   name: string;
   argsBuffer: string;
@@ -242,6 +251,9 @@ export class MercuryProvider implements ChatProvider {
     };
 
     // 处理帧内tool_calls。
+    // OpenAI 兼容流式里，一次调用的参数分多帧到达：首帧带 index/id/name，
+    // 续帧只带 index 和 arguments 片段。必须按 index 归属，否则一次调用会被
+    // 拆成多个参数不全的调用。
     // 增量帧累加参数；扩散全量帧的语义官方文档未明确，用前缀判断兼容两种情况：
     // 新值以已累积内容为前缀说明是完整快照(直接替换)，否则按增量累加。
     const handleToolCalls = (calls: MercuryToolCallJson[], fullFrame: boolean): void => {
@@ -253,20 +265,52 @@ export class MercuryProvider implements ChatProvider {
         const fnName: string = fn !== undefined && fn !== null ? textOr(fn.name) : '';
         const fnArgs: string = fn !== undefined && fn !== null ? textOr(fn.arguments) : '';
         const callId: string = textOr(callJson.id);
+        const indexValue: number | undefined = numberOr(callJson.index);
+        const callIndex: number = indexValue !== undefined ? indexValue : -1;
 
-        // 查找已有pending(按id，id为空时按name+未完成状态)
         let pending: PendingTool | null = null;
-        for (const p of pendingTools) {
-          if (!p.emitted && ((callId.length > 0 && p.id === callId) ||
-            (callId.length === 0 && p.name === fnName && fnName.length > 0))) {
-            pending = p;
-            break;
+
+        // 1) 按 index 归属(续帧的唯一可靠依据)
+        if (callIndex >= 0) {
+          for (const p of pendingTools) {
+            if (!p.emitted && p.index === callIndex) {
+              pending = p;
+              break;
+            }
+          }
+        }
+        // 2) 按调用 id
+        if (pending === null && callId.length > 0) {
+          for (const p of pendingTools) {
+            if (!p.emitted && p.id === callId) {
+              pending = p;
+              break;
+            }
+          }
+        }
+        // 3) 按工具名
+        if (pending === null && fnName.length > 0) {
+          for (const p of pendingTools) {
+            if (!p.emitted && p.name === fnName) {
+              pending = p;
+              break;
+            }
+          }
+        }
+        // 4) 只带参数片段的续帧: 归到最后一个未完成的调用
+        if (pending === null && callId.length === 0 && fnName.length === 0 && callIndex < 0) {
+          for (let i = pendingTools.length - 1; i >= 0; i--) {
+            if (!pendingTools[i].emitted) {
+              pending = pendingTools[i];
+              break;
+            }
           }
         }
 
         if (pending === null) {
           // 新工具调用
           const newPending: PendingTool = {
+            index: callIndex >= 0 ? callIndex : pendingTools.length,
             id: callId.length > 0 ? callId : `call_${Date.now()}_${pendingTools.length}`,
             name: fnName,
             argsBuffer: fnArgs,
@@ -381,6 +425,20 @@ export class MercuryProvider implements ChatProvider {
             chunk = JSON.parse(trimmed) as MercuryStreamChunkJson;
           } catch (e) {
             return;
+          }
+
+          // 服务端可能在 200 的流里直接下发错误帧，不处理就会变成"没有返回任何内容"
+          if (present(chunk.error)) {
+            const errorRecord: Record<string, Object> | null = recordOrNull(chunk.error);
+            if (errorRecord !== null) {
+              const message: string = stringField(errorRecord, 'message');
+              const errEvent: StreamEvent = {
+                type: 'error',
+                error: message.length > 0 ? message : '服务端返回错误'
+              };
+              callbacks.onEvent(errEvent);
+              return;
+            }
           }
 
           if (present(chunk.usage)) {

@@ -1,4 +1,5 @@
 import { httpJsonRequest, extractErrorMessage, JsonResponse, HttpRequestOptions } from './HttpStream';
+import { recordOrNull } from './Json';
 import { ChatError, ProviderSettings, ToolType } from '../types/Types';
 
 // 工具执行结果
@@ -40,6 +41,12 @@ function readString(obj: Record<string, Object>, keys: string[]): string | undef
     }
   }
   return undefined;
+}
+
+// readString 的空值版本，字段缺失时返回空串
+function text(obj: Record<string, Object>, keys: string[]): string {
+  const value: string | undefined = readString(obj, keys);
+  return value !== undefined ? value : '';
 }
 
 function readNumber(obj: Record<string, Object>, key: string): number | undefined {
@@ -105,6 +112,68 @@ export function extractHostname(url: string): string {
   return rest.length > 0 ? rest : url;
 }
 
+function isWrapChar(char: string): boolean {
+  return '<>"\'`()[]{}，。、；'.indexOf(char) !== -1;
+}
+
+// 模型给出的地址常带引号/括号/Markdown 包裹或缺协议。
+// 官方要求: 必须是含 host 的 HTTP/HTTPS 地址，不能携带用户名或密码，长度不超过 8192。
+export function normalizeFetchUrl(raw: string): string {
+  let value: string = raw.trim();
+  if (value.length === 0) {
+    return '';
+  }
+
+  // Markdown 链接 [文本](地址)
+  const openIdx: number = value.indexOf('](');
+  if (openIdx !== -1) {
+    const rest: string = value.substring(openIdx + 2);
+    const closeIdx: number = rest.indexOf(')');
+    value = closeIdx !== -1 ? rest.substring(0, closeIdx) : rest;
+  }
+
+  // 截到第一个空白处
+  for (let i = 0; i < value.length; i++) {
+    const char: string = value.charAt(i);
+    if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
+      value = value.substring(0, i);
+      break;
+    }
+  }
+
+  while (value.length > 0 && isWrapChar(value.charAt(0))) {
+    value = value.substring(1);
+  }
+  while (value.length > 0 && isWrapChar(value.charAt(value.length - 1))) {
+    value = value.substring(0, value.length - 1);
+  }
+  if (value.length === 0) {
+    return '';
+  }
+
+  const lower: string = value.toLowerCase();
+  if (lower.startsWith('//')) {
+    value = `https:${value}`;
+  } else if (!lower.startsWith('http://') && !lower.startsWith('https://')) {
+    value = `https://${value}`;
+  }
+
+  // 校验 authority: 必须有 host 且不能带用户名密码
+  const schemeIdx: number = value.indexOf('://');
+  let authority: string = value.substring(schemeIdx + 3);
+  const slashIdx: number = authority.indexOf('/');
+  if (slashIdx !== -1) {
+    authority = authority.substring(0, slashIdx);
+  }
+  if (authority.length === 0 || authority.indexOf('@') !== -1 || authority.indexOf('.') === -1) {
+    return '';
+  }
+  if (value.length > 8192) {
+    return '';
+  }
+  return value;
+}
+
 // DeepSeek 的 search / fetch 工具，四个服务商共用
 export class DeepSeekTools {
   private apiKey: string;
@@ -158,15 +227,28 @@ export class DeepSeekTools {
     });
   }
 
-  // 搜索：给模型返回标题/链接/摘要/正文，正文限制长度避免token爆炸
+  // 搜索：给模型返回标题/链接/来源/长摘要/正文，正文限制长度避免token爆炸
   search(query: string, count: number): Promise<ToolResult> {
     if (!this.isAvailable()) {
-      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，无法使用搜索功能'));
+      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，搜索与抓取工具不可用'));
+    }
+
+    // 官方限制: query 为 1~128 个字符，count 取值 1~50
+    const safeQuery: string = query.trim().substring(0, Math.min(query.trim().length, 128));
+    if (safeQuery.length === 0) {
+      return Promise.resolve(DeepSeekTools.fail('搜索词为空'));
+    }
+    let safeCount: number = Math.round(count);
+    if (!(safeCount >= 1)) {
+      safeCount = 1;
+    }
+    if (safeCount > 50) {
+      safeCount = 50;
     }
 
     const payload: Record<string, Object> = {
-      'query': query,
-      'count': count,
+      'query': safeQuery,
+      'count': safeCount,
       'need_content': true
     };
 
@@ -180,11 +262,18 @@ export class DeepSeekTools {
       .catch((error: Error) => DeepSeekTools.fail(`搜索失败: ${error.message}`));
   }
 
+  // 官方字段语义: snippet 是 100~200 字给前端展示，summary 是 600~800 字给模型阅读，
+  // rerank_score>=1.5 为优质结果，authority>=3 为极权威来源。给模型的必须是后者，
+  // 只给 snippet 会让模型认为拿不到有效信息而反复重搜。
   private parseSearchResponse(body: string): ToolResult {
     let root: Record<string, Object>;
     try {
       const parsed: Object = JSON.parse(body) as Object;
-      root = toRecord(parsed);
+      const record: Record<string, Object> | null = recordOrNull(parsed);
+      if (record === null) {
+        return DeepSeekTools.fail('搜索结果格式异常');
+      }
+      root = record;
     } catch (e) {
       return DeepSeekTools.fail('搜索结果解析失败');
     }
@@ -198,21 +287,46 @@ export class DeepSeekTools {
     let index: number = 1;
 
     for (const raw of rawItems) {
-      if (!isRecord(raw)) {
+      const obj: Record<string, Object> | null = recordOrNull(raw);
+      if (obj === null) {
         continue;
       }
-      const obj: Record<string, Object> = toRecord(raw);
-      const title: string = readString(obj, ['title', 'name']) || '(无标题)';
-      const url: string = readString(obj, ['url', 'link', 'href']) || '';
-      const snippet: string = readString(obj, ['snippet', 'description', 'summary', 'abstract']) || '';
-      const content: string | undefined = readString(obj, ['content', 'text', 'page_content', 'markdown']);
+      const title: string = text(obj, ['title', 'name']).length > 0 ? text(obj, ['title', 'name']) : '(无标题)';
+      const url: string = text(obj, ['url', 'link', 'href']);
+      // summary 是给模型读的长摘要(600~800字)，缺失时才退回给前端用的短摘要
+      const summary: string = text(obj, ['summary']).length > 0
+        ? text(obj, ['summary'])
+        : text(obj, ['snippet', 'description', 'abstract']);
+      const content: string = text(obj, ['content', 'text', 'page_content', 'markdown']);
 
       let section: string = `${index}. ${title}\n   URL: ${url}`;
-      if (snippet.length > 0) {
-        section += `\n   摘要: ${snippet}`;
+
+      const meta: string[] = [];
+      const siteName: string = text(obj, ['site_name']);
+      if (siteName.length > 0) {
+        meta.push(`来源: ${siteName}`);
       }
-      if (content !== undefined && content.length > 0) {
-        section += `\n   内容:\n${truncate(content, 2000, '...')}`;
+      const date: string = text(obj, ['date']);
+      if (date.length > 0) {
+        meta.push(`发布: ${date}`);
+      }
+      const score: number | undefined = readNumber(obj, 'rerank_score');
+      if (score !== undefined) {
+        meta.push(`相关性: ${score.toFixed(1)}`);
+      }
+      const authority: number | undefined = readNumber(obj, 'authority');
+      if (authority !== undefined && authority >= 0) {
+        meta.push(`权威性: ${authority}`);
+      }
+      if (meta.length > 0) {
+        section += `\n   ${meta.join('  ')}`;
+      }
+
+      if (summary.length > 0) {
+        section += `\n   摘要: ${summary}`;
+      }
+      if (content.length > 0) {
+        section += `\n   正文:\n${truncate(content, 2000, '...')}`;
       }
       sections.push(section);
       index++;
@@ -227,17 +341,22 @@ export class DeepSeekTools {
   // 抓取网页：给模型返回标题+正文，超长截断
   fetch(url: string): Promise<ToolResult> {
     if (!this.isAvailable()) {
-      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，无法使用抓取功能'));
+      return Promise.resolve(DeepSeekTools.fail('未配置 DeepSeek API Key，搜索与抓取工具不可用'));
     }
 
-    const payload: Record<string, Object> = { 'url': url };
+    const target: string = normalizeFetchUrl(url);
+    if (target.length === 0) {
+      return Promise.resolve(DeepSeekTools.fail(`抓取地址无效: ${url}`));
+    }
+
+    const payload: Record<string, Object> = { 'url': target };
 
     return this.request('/v1/tools/fetch', JSON.stringify(payload), 60000)
       .then((response: JsonResponse) => {
         if (response.statusCode !== 200) {
           return DeepSeekTools.fail(`抓取请求失败: ${extractErrorMessage(response.body)}`);
         }
-        return this.parseFetchResponse(response.body, url);
+        return this.parseFetchResponse(response.body, target);
       })
       .catch((error: Error) => DeepSeekTools.fail(`抓取失败: ${error.message}`));
   }

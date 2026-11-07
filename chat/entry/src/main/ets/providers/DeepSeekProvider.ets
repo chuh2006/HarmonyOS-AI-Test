@@ -247,7 +247,128 @@ export class DeepSeekProvider implements ChatProvider {
       }
     }
 
-    return this.mergeSameRole(result);
+    return this.enforceToolPairing(this.mergeSameRole(result));
+  }
+
+  // Anthropic 要求每个 tool_use 之后紧跟包含对应 tool_result 的 user 消息，
+  // 否则整条请求 400(tool_use ids were found without tool_result blocks)。
+  // 历史可能因出错、停止、切换会话而残缺，发请求前在这里做最后一次结构校验。
+  private enforceToolPairing(messages: AnthropicMessage[]): AnthropicMessage[] {
+    const result: AnthropicMessage[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const current: AnthropicMessage = messages[i];
+      const useIds: string[] = this.toolUseIds(current);
+
+      if (current.role !== 'assistant' || useIds.length === 0) {
+        // 没有配对 tool_use 的 tool_result 同样会被服务端拒绝，直接丢掉
+        if (current.role === 'user' && this.toolResultIds(current).length > 0) {
+          const keptBlocks: AnthropicContentBlock[] = [];
+          for (const block of current.content) {
+            if (block.type !== 'tool_result') {
+              keptBlocks.push(block);
+            }
+          }
+          if (keptBlocks.length > 0) {
+            const stripped: AnthropicMessage = { role: 'user', content: keptBlocks };
+            result.push(stripped);
+          }
+          continue;
+        }
+        result.push(current);
+        continue;
+      }
+
+      const next: AnthropicMessage | null = i + 1 < messages.length ? messages[i + 1] : null;
+      if (next !== null && next.role === 'user' && this.coversToolUseIds(next, useIds)) {
+        result.push(current);
+        result.push(this.toolResultsFirst(next));
+        i++;
+        continue;
+      }
+
+      // 残缺：丢掉 tool_use 块只保留文本与思考，同时丢掉紧跟的孤立 tool_result
+      const keptBlocks: AnthropicContentBlock[] = [];
+      for (const block of current.content) {
+        if (block.type !== 'tool_use') {
+          keptBlocks.push(block);
+        }
+      }
+      if (keptBlocks.length > 0) {
+        const stripped: AnthropicMessage = { role: 'assistant', content: keptBlocks };
+        result.push(stripped);
+      }
+      if (next !== null && next.role === 'user' && this.toolResultIds(next).length > 0) {
+        i++;
+      }
+    }
+
+    return result;
+  }
+
+  private toolUseIds(message: AnthropicMessage): string[] {
+    const ids: string[] = [];
+    if (message.role !== 'assistant') {
+      return ids;
+    }
+    for (const block of message.content) {
+      if (block.type === 'tool_use' && block.id !== undefined) {
+        ids.push(block.id);
+      }
+    }
+    return ids;
+  }
+
+  private toolResultIds(message: AnthropicMessage): string[] {
+    const ids: string[] = [];
+    for (const block of message.content) {
+      if (block.type === 'tool_result' && block.tool_use_id !== undefined) {
+        ids.push(block.tool_use_id);
+      }
+    }
+    return ids;
+  }
+
+  private coversToolUseIds(message: AnthropicMessage, useIds: string[]): boolean {
+    const resultIds: string[] = this.toolResultIds(message);
+    for (const id of useIds) {
+      let matched: boolean = false;
+      for (const resultId of resultIds) {
+        if (resultId === id) {
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // 官方要求: 同一条 user 消息里 tool_result 块必须排在文本之前
+  private toolResultsFirst(message: AnthropicMessage): AnthropicMessage {
+    const results: AnthropicContentBlock[] = [];
+    const others: AnthropicContentBlock[] = [];
+    for (const block of message.content) {
+      if (block.type === 'tool_result') {
+        results.push(block);
+      } else {
+        others.push(block);
+      }
+    }
+    if (others.length === 0) {
+      return message;
+    }
+    const blocks: AnthropicContentBlock[] = [];
+    for (const block of results) {
+      blocks.push(block);
+    }
+    for (const block of others) {
+      blocks.push(block);
+    }
+    const reordered: AnthropicMessage = { role: message.role, content: blocks };
+    return reordered;
   }
 
   // Anthropic 要求 user/assistant 交替出现：清洗历史后可能出现相邻同角色消息，

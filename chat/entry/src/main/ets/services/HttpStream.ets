@@ -155,9 +155,12 @@ function toRequestMethod(method: string): http.RequestMethod {
 }
 
 // 构建请求头(合并默认SSE头)
+// Accept-Encoding 必须是 identity: 压缩响应会被整体解压后才交付，
+// dataReceive 就退化成一次性到达，流式效果消失。
 function buildHeaders(custom: Record<string, string> | undefined): Record<string, string> {
   const headers: Record<string, string> = {
     'Accept': 'text/event-stream',
+    'Accept-Encoding': 'identity',
     'Cache-Control': 'no-cache'
   };
   if (custom !== undefined) {
