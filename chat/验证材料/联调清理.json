@@ -1,0 +1,22 @@
+[
+  {
+    "provider": "deepseek",
+    "keyEmpty": true,
+    "officialEndpoint": true
+  },
+  {
+    "provider": "openai",
+    "keyEmpty": true,
+    "officialEndpoint": true
+  },
+  {
+    "provider": "mercury",
+    "keyEmpty": true,
+    "officialEndpoint": true
+  },
+  {
+    "provider": "gemini",
+    "keyEmpty": true,
+    "officialEndpoint": true
+  }
+]

@@ -1,0 +1,38 @@
+✔ SSE: every split boundary, CRLF, comments, multiline, final buffer (0.998292ms)
+✔ HTTP: real decoder survives every byte boundary and emits before end (49.473084ms)
+✔ HTTP: status arriving after dataEnd is respected and secret is redacted (2.942333ms)
+✔ HTTP: cancellation settles immediately and destroys a silent connection (0.186ms)
+✔ DeepSeek: fragmented tools preserve thinking, signatures, IDs and result order (0.611417ms)
+✔ DeepSeek: truncated stream and incomplete tool JSON fail with partial text retained (0.112ms)
+✔ OpenAI: encrypted reasoning and assistant phase survive final output and disk serialization (0.206667ms)
+✔ OpenAI: interleaved tool arguments are correlated by output_index (0.099958ms)
+✔ OpenAI: incomplete response retains final partial output and reports reason (0.069208ms)
+✔ Mercury: diffusion revises prefix and length, finish-only event keeps final frame (0.148792ms)
+✔ Mercury: regular streaming appends instead of replacing (0.053042ms)
+✔ Gemini: preserve original Parts and every signature including empty text (0.176709ms)
+✔ Gemini: empty thought summary completes; safety block produces specific error (0.060458ms)
+✔ Requests: actual capabilities, stateless Responses, authentication, endpoints (0.404416ms)
+✔ Tools: bounded parallel execution, stable order, once-only IDs, compact display (22.272875ms)
+✔ Tools: invalid arguments and HTTP failures become protocol errors for the model (0.278958ms)
+✔ Engine: deepseek-flash multi-round parallel tools and history replay (0.740125ms)
+✔ Engine: gpt-6-astra multi-round parallel tools and history replay (0.259167ms)
+✔ Engine: mercury-3 multi-round parallel tools and history replay (0.430458ms)
+✔ Engine: gemini-4-argon multi-round parallel tools and history replay (0.210334ms)
+✔ Engine: no DeepSeek key disables definitions without blocking another provider (0.098042ms)
+✔ Engine: stopping during a tool aborts subsequent requests, late callbacks never cross sessions (0.203125ms)
+✔ Engine: loop limit bounds tool executions and retains completed exchanges (0.555792ms)
+✔ Store: oversized Unicode history, protocol signatures, process reload and interrupted state (7.384791ms)
+✔ Vault: first save, overwrite, fresh instance lookup and removal (0.354209ms)
+✔ Store: damaged primary recovers backup and accepts the next atomic save (13.315125ms)
+✔ Engine: retry reuses the user turn and replaces failed protocol output (0.26225ms)
+✔ Gemini: interleaved thought, answer and call display order matches Part order (0.096208ms)
+✔ Mercury: an explicit empty intermediate frame can revise text to zero length (0.040416ms)
+✔ Fetch: successful Markdown is returned to the model and compact source metadata to the UI (0.216209ms)
+ℹ tests 30
+ℹ suites 0
+ℹ pass 30
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 305.29075

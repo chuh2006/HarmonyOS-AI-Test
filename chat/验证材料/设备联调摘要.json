@@ -1,0 +1,32 @@
+{
+  "history_bytes": 13580,
+  "sessions": [
+    [
+      "deepseek-flash",
+      4
+    ],
+    [
+      "gpt-6-astra",
+      3
+    ],
+    [
+      "mercury-3",
+      1
+    ],
+    [
+      "gemini-4-argon",
+      3
+    ],
+    [
+      "gemini-4-argon",
+      0
+    ]
+  ],
+  "requests_by_model": {
+    "deepseek-flash": 5,
+    "gpt-6-astra": 4,
+    "mercury-3": 2
+  },
+  "gemini_requests": 5,
+  "tool_requests": 4
+}

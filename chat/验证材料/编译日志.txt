@@ -1,0 +1,76 @@
+> hvigor UP-TO-DATE :entry:default@PreBuild...  
+> hvigor Finished :entry:default@CreateModuleInfo... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@GenerateMetadata...  
+> hvigor Finished :entry:default@ConfigureCmake... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@MergeProfile...  
+> hvigor UP-TO-DATE :entry:default@CreateBuildProfile...  
+> hvigor Finished :entry:default@PreCheckSyscap... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@GeneratePkgContextInfo...  
+> hvigor Finished :entry:default@GeneratePkgSdkInfo... after 1 ms 
+> hvigor Finished :entry:default@ProcessIntegratedHsp... after 1 ms 
+> hvigor Finished :entry:default@BuildNativeWithCmake... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@MakePackInfo...  
+> hvigor Finished :entry:default@SyscapTransform... after 10 ms 
+> hvigor UP-TO-DATE :entry:default@ProcessProfile...  
+> hvigor UP-TO-DATE :entry:default@ProcessRouterMap...  
+> hvigor UP-TO-DATE :entry:default@ProcessShareConfig...  
+> hvigor Finished :entry:default@ProcessStartupConfig... after 1 ms 
+> hvigor Finished :entry:default@BuildNativeWithNinja... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@ProcessResource...  
+> hvigor UP-TO-DATE :entry:default@GenerateLoaderJson...  
+> hvigor UP-TO-DATE :entry:default@ProcessLibs...  
+> hvigor UP-TO-DATE :entry:default@CompileResource...  
+> hvigor UP-TO-DATE :entry:default@DoNativeStrip...  
+> hvigor Finished :entry:default@BuildJS... after 1 ms 
+> hvigor UP-TO-DATE :entry:default@CacheNativeLibs...  
+> hvigor WARN: WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:46:10
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:46:43
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:49:12
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:52:11
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:52:43
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:85:18
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:89:25
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:93:7
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:94:17
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:95:9
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:97:19
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:98:7
+ Function may throw exceptions. Special handling is required.
+
+WARN: ArkTS:WARN File: /Users/chuh/Documents/test/minichat/chat/entry/src/main/ets/services/Store.ets:100:5
+ Function may throw exceptions. Special handling is required.
+
+
+> hvigor Finished :entry:default@CompileArkTS... after 1 s 971 ms 
+> hvigor UP-TO-DATE :entry:default@GeneratePkgModuleJson...  
+> hvigor Finished :entry:default@ProcessCompiledResources... after 1 ms 
+> hvigor Finished :entry:default@PackageHap... after 242 ms 
+> hvigor Finished :entry:default@PackingCheck... after 3 ms 
+> hvigor WARN: Will skip sign 'hos_hap'. No signingConfigs profile is configured in current project.
+             If needed, configure the signingConfigs in /Users/chuh/Documents/test/minichat/chat/build-profile.json5.
+> hvigor Finished :entry:default@SignHap... after 1 ms 
+> hvigor Finished :entry:default@CollectDebugSymbol... after 1 ms 
+> hvigor Finished :entry:assembleHap... after 1 ms 
+> hvigor BUILD SUCCESSFUL in 3 s 465 ms 
