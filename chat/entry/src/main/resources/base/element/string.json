@@ -2,15 +2,15 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "Mira AI chat module"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "Mira AI Chat"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "Mira"
     }
   ]
 }
