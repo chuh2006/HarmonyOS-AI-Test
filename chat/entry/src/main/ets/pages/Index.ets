@@ -441,57 +441,78 @@ struct Index {
   }
 
   build() {
-    Stack() {
-      Column() {
-        // ------- header -------
+    Column() {
+      // ------- header -------
         Row({ space: 10 }) {
-          Row() {
-            IconMenu(COLOR_TEXT, 18)
+          Column() {
+            Row() {
+              IconMenu(COLOR_TEXT, 18)
+            }
+            .width(38).height(38)
+            .borderRadius(12)
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor(COLOR_SURFACE)
+            .border({ width: 1, color: COLOR_BORDER })
+            .onClick(() => {
+              this.showSessions = true;
+            })
           }
-          .width(38).height(38)
-          .borderRadius(12)
-          .justifyContent(FlexAlign.Center)
-          .backgroundColor(COLOR_SURFACE)
-          .border({ width: 1, color: COLOR_BORDER })
-          .onClick(() => {
-            this.showSessions = true;
+          .bindSheet(this.$showSessions, () => {
+            this.sessionsSheet()
+          }, {
+            dragBar: true
           })
 
-        Column({ space: 2 }) {
-          Text(this.headerTitle)
-            .fontSize(FONT_SMALL + 2)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(COLOR_TEXT)
-            .maxLines(1)
-            .textAlign(TextAlign.Center)
-          Row({ space: 4 }) {
-            Text(this.headerModel)
-              .fontSize(11)
-              .fontColor(COLOR_TEXT_3)
-            IconChevron(COLOR_TEXT_3, 11, false)
+          Column() {
+            Column({ space: 2 }) {
+              Text(this.headerTitle)
+                .fontSize(FONT_SMALL + 2)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(COLOR_TEXT)
+                .maxLines(1)
+                .textAlign(TextAlign.Center)
+              Row({ space: 4 }) {
+                Text(this.headerModel)
+                  .fontSize(11)
+                  .fontColor(COLOR_TEXT_3)
+                IconChevron(COLOR_TEXT_3, 11, false)
+              }
+            }
+            .width('100%')
+            .alignItems(HorizontalAlign.Center)
+            .onClick(() => {
+              this.showModel = true;
+            })
           }
-        }
-        .layoutWeight(1)
-        .alignItems(HorizontalAlign.Center)
-        .onClick(() => {
-          this.showModel = true;
-        })
+          .layoutWeight(1)
+          .bindSheet(this.$showModel, () => {
+            this.modelSheet()
+          }, {
+            dragBar: true
+          })
 
-        Row() {
-          IconSliders(COLOR_TEXT, 18)
+          Column() {
+            Row() {
+              IconSliders(COLOR_TEXT, 18)
+            }
+            .width(38).height(38)
+            .borderRadius(12)
+            .justifyContent(FlexAlign.Center)
+            .backgroundColor(COLOR_SURFACE)
+            .border({ width: 1, color: COLOR_BORDER })
+            .onClick(() => {
+              this.showSettings = true;
+            })
+          }
+          .bindSheet(this.$showSettings, () => {
+            this.settingsSheet()
+          }, {
+            dragBar: true
+          })
         }
-        .width(38).height(38)
-        .borderRadius(12)
-        .justifyContent(FlexAlign.Center)
-        .backgroundColor(COLOR_SURFACE)
-        .border({ width: 1, color: COLOR_BORDER })
-        .onClick(() => {
-          this.showSettings = true;
-        })
-      }
-      .width('100%')
-      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-      .backgroundColor('#F8F8FB')
+        .width('100%')
+        .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+        .backgroundColor('#F8F8FB')
 
       // ------- messages -------
       if (this.msgs.length === 0) {
@@ -586,70 +607,9 @@ struct Index {
       .width('100%')
       .padding({ left: 14, right: 14, top: 8, bottom: 16 })
       .backgroundColor('#F8F8FB')
-      }
-      .width('100%')
-      .height('100%')
-      .backgroundColor('#F4F4F7')
-
-      // ------- overlays: conversation list / model options / api settings -------
-      if (this.showSessions) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('rgba(18,18,28,0.4)')
-          .onClick(() => {
-            this.showSessions = false;
-          })
-        Column() {
-          this.sessionsSheet()
-        }
-        .width('100%')
-        .height('82%')
-        .align(Alignment.Bottom)
-        .backgroundColor('#F8F8FB')
-        .borderRadius({ topLeft: 20, topRight: 20 })
-        .clip(true)
-      }
-
-      if (this.showModel) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('rgba(18,18,28,0.4)')
-          .onClick(() => {
-            this.showModel = false;
-          })
-        Column() {
-          this.modelSheet()
-        }
-        .width('100%')
-        .height('88%')
-        .align(Alignment.Bottom)
-        .backgroundColor('#F8F8FB')
-        .borderRadius({ topLeft: 20, topRight: 20 })
-        .clip(true)
-      }
-
-      if (this.showSettings) {
-        Column()
-          .width('100%')
-          .height('100%')
-          .backgroundColor('rgba(18,18,28,0.4)')
-          .onClick(() => {
-            this.showSettings = false;
-          })
-        Column() {
-          this.settingsSheet()
-        }
-        .width('100%')
-        .height('88%')
-        .align(Alignment.Bottom)
-        .backgroundColor('#F8F8FB')
-        .borderRadius({ topLeft: 20, topRight: 20 })
-        .clip(true)
-      }
     }
     .width('100%')
     .height('100%')
+    .backgroundColor('#F4F4F7')
   }
 }
