@@ -70,14 +70,23 @@ struct Index {
 
   private scroller: ListScroller = new ListScroller();
   private lastCount: number = -1;
+  private curSession: Session = new Session();
 
   aboutToAppear(): void {
-    const ctx = getContext(this) as common.UIAbilityContext;
-    SessionStore.init(ctx.filesDir);
-    ENGINE.loadCredentials().then(() => {
-      this.toolsReady = ToolRunner.available(ENGINE.getKey('deepseek'));
-    });
-    this.sessions = SessionStore.loadAll();
+    try {
+      let filesDir: string = '';
+      try {
+        const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+        filesDir = ctx.filesDir;
+      } catch (e1) {
+        const ctx = getContext(this) as common.UIAbilityContext;
+        filesDir = ctx.filesDir;
+      }
+      SessionStore.init(filesDir);
+      ENGINE.loadCredentials().then(() => {
+        this.toolsReady = ToolRunner.available(ENGINE.getKey('deepseek'));
+      });
+      this.sessions = SessionStore.loadAll();
     const settings: Record<string, Object> = SessionStore.loadSettings();
     const lastId: Object | undefined = settings['lastSessionId'];
     let picked: string = '';
@@ -116,6 +125,9 @@ struct Index {
       }
     };
     this.phase = ENGINE.phaseOf(this.currentId);
+    } catch (e) {
+      // initialization must never leave the page unusable
+    }
   }
 
   private makeSession(): Session {
@@ -157,6 +169,7 @@ struct Index {
       this.msgs = [];
       return;
     }
+    this.curSession = s;
     this.msgs = s.messages.slice();
     this.headerTitle = s.title.length > 0 ? s.title : '新会话';
     this.headerModel = providerInfo(s.providerId).name + ' · ' + modelInfo(s.providerId, s.modelId).label;
@@ -302,36 +315,6 @@ struct Index {
   // ---------------- builders ----------------
 
   @Builder
-  headerMenuButton() {
-    Row() {
-      IconMenu(COLOR_TEXT, 18)
-    }
-    .width(38).height(38)
-    .borderRadius(12)
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor(COLOR_SURFACE)
-    .border({ width: 1, color: COLOR_BORDER })
-    .onClick(() => {
-      this.showSessions = true;
-    })
-  }
-
-  @Builder
-  headerSettingsButton() {
-    Row() {
-      IconSliders(COLOR_TEXT, 18)
-    }
-    .width(38).height(38)
-    .borderRadius(12)
-    .justifyContent(FlexAlign.Center)
-    .backgroundColor(COLOR_SURFACE)
-    .border({ width: 1, color: COLOR_BORDER })
-    .onClick(() => {
-      this.showSettings = true;
-    })
-  }
-
-  @Builder
   statusBar() {
     if (phaseLabel(this.phase).length > 0) {
       Row({ space: 7 }) {
@@ -400,215 +383,229 @@ struct Index {
       .margin({ top: 14 })
     }
     .width('100%')
-    .height('100%')
+    .layoutWeight(1)
     .alignItems(HorizontalAlign.Center)
+  }
+
+  @Builder
+  sessionsSheet() {
+    SessionsSheetView({
+      sessions: this.sessions,
+      currentId: this.currentId,
+      onSelect: (id: string) => {
+        this.switchTo(id);
+      },
+      onDelete: (id: string) => {
+        this.deleteSession(id);
+      },
+      onNew: () => {
+        this.newSession();
+      }
+    })
+  }
+
+  @Builder
+  modelSheet() {
+    ModelSheetView({
+      session: this.curSession,
+      toolsReady: this.toolsReady,
+      onChanged: (s: Session) => {
+        this.onSessionChanged(s);
+      },
+      onOpenSettings: () => {
+        this.showModel = false;
+        this.showSettings = true;
+      },
+      onClose: () => {
+        this.showModel = false;
+      }
+    })
+  }
+
+  @Builder
+  settingsSheet() {
+    SettingsSheetView({
+      getKey: (id: string) => {
+        return ENGINE.getKey(id);
+      },
+      getBaseUrl: (id: string, fallback: string) => {
+        return ENGINE.getBaseUrl(id, fallback);
+      },
+      onSave: (id: string, key: string, url: string) => {
+        this.onSettingsSave(id, key, url);
+      },
+      onClose: () => {
+        this.showSettings = false;
+      }
+    })
   }
 
   build() {
     Column() {
-      Column() {
-        Column() {
-          // ------- header -------
-          Row({ space: 10 }) {
-            this.headerMenuButton()
-
-            Column({ space: 2 }) {
-              Text(this.headerTitle)
-                .fontSize(FONT_SMALL + 2)
-                .fontWeight(FontWeight.Medium)
-                .fontColor(COLOR_TEXT)
-                .maxLines(1)
-                .textAlign(TextAlign.Center)
-              Row({ space: 4 }) {
-                Text(this.headerModel)
-                  .fontSize(11)
-                  .fontColor(COLOR_TEXT_3)
-                IconChevron(COLOR_TEXT_3, 11, false)
-              }
-            }
-            .layoutWeight(1)
-            .alignItems(HorizontalAlign.Center)
-            .onClick(() => {
-              this.showModel = true;
-            })
-
-            this.headerSettingsButton()
-          }
-          .width('100%')
-          .padding({ left: 14, right: 14, top: 10, bottom: 10 })
-          .backgroundColor('#F8F8FB')
-
-          // ------- messages -------
-          if (this.msgs.length === 0) {
-            this.emptyState()
-          } else {
-            List({ space: 22, scroller: this.scroller }) {
-              ListItem() {
-                Column().width('100%').height(4)
-              }
-              ForEach(this.msgs, (m: Msg) => {
-                ListItem() {
-                  MessageView({
-                    msg: m,
-                    liveLabel: m.status === 'streaming' ? phaseLabel(this.phase) : '',
-                    onRetry: () => {
-                      this.retryNow();
-                    }
-                  })
-                }
-              }, (m: Msg) => m.id)
-              ListItem() {
-                Column().width('100%').height(4)
-              }
-            }
-            .layoutWeight(1)
-            .width('100%')
-            .padding({ left: 16, right: 16 })
-            .scrollBar(BarState.Off)
-            .edgeEffect(EdgeEffect.Spring)
-            .onScrollIndex((first: number, last: number) => {
-              this.atBottom = last >= this.msgs.length;
-            })
-          }
-
-          // ------- composer -------
-          Column({ space: 0 }) {
-            this.statusBar()
-            Row({ space: 10 }) {
-              TextArea({
-                text: this.inputText,
-                placeholder: '输入消息…'
-              })
-                .fontSize(15)
-                .fontColor(COLOR_TEXT)
-                .placeholderColor(COLOR_TEXT_3)
-                .backgroundColor(COLOR_SURFACE)
-                .borderRadius(18)
-                .border({ width: 1, color: COLOR_BORDER })
-                .padding({ left: 15, right: 15, top: 11, bottom: 11 })
-                .maxLines(5)
-                .constraintSize({ minHeight: 46, maxHeight: 132 })
-                .layoutWeight(1)
-                .enterKeyType(EnterKeyType.Send)
-                .onChange((v: string) => {
-                  this.inputText = v;
-                })
-                .onSubmit((): boolean => {
-                  this.sendNow();
-                  return true;
-                })
-
-              if (ENGINE.isRunning(this.currentId)) {
-                Column() {
-                  IconStop('#FFFFFF', 19)
-                }
-                .width(46).height(46)
-                .justifyContent(FlexAlign.Center)
-                .alignItems(HorizontalAlign.Center)
-                .borderRadius(23)
-                .linearGradient({ angle: 135, colors: [[COLOR_ERR, 0], ['#E86A64', 1]] })
-                .onClick(() => {
-                  this.stopNow();
-                })
-              } else {
-                Column() {
-                  IconSend('#FFFFFF', 21)
-                }
-                .width(46).height(46)
-                .justifyContent(FlexAlign.Center)
-                .alignItems(HorizontalAlign.Center)
-                .borderRadius(23)
-                .linearGradient({ angle: 135, colors: [[GRAD_PRIMARY[0], 0], [GRAD_PRIMARY[1], 1]] })
-                .opacity(this.inputText.trim().length > 0 ? 1 : 0.45)
-                .onClick(() => {
-                  this.sendNow();
-                })
-              }
-            }
-            .width('100%')
-            .alignItems(VerticalAlign.Bottom)
-          }
-          .width('100%')
-          .padding({ left: 14, right: 14, top: 8, bottom: 16 })
-          .backgroundColor('#F8F8FB')
+      // ------- header -------
+      Row({ space: 10 }) {
+        Row() {
+          IconMenu(COLOR_TEXT, 18)
         }
-        .width('100%')
-        .height('100%')
-        .backgroundColor('#F8F8FB')
+        .width(38).height(38)
+        .borderRadius(12)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(COLOR_SURFACE)
+        .border({ width: 1, color: COLOR_BORDER })
+        .onClick(() => {
+          this.showSessions = true;
+        })
         .bindSheet(this.$showSessions, () => {
-          SessionsSheetView({
-            sessions: this.sessions,
-            currentId: this.currentId,
-            onSelect: (id: string) => {
-              this.switchTo(id);
-            },
-            onDelete: (id: string) => {
-              this.deleteSession(id);
-            },
-            onNew: () => {
-              this.newSession();
-            }
-          })
+          this.sessionsSheet()
         }, {
           height: '80%',
-          dragBar: true,
-          onDisappear: () => {
-            this.showSessions = false;
+          dragBar: true
+        })
+
+        Column({ space: 2 }) {
+          Text(this.headerTitle)
+            .fontSize(FONT_SMALL + 2)
+            .fontWeight(FontWeight.Medium)
+            .fontColor(COLOR_TEXT)
+            .maxLines(1)
+            .textAlign(TextAlign.Center)
+          Row({ space: 4 }) {
+            Text(this.headerModel)
+              .fontSize(11)
+              .fontColor(COLOR_TEXT_3)
+            IconChevron(COLOR_TEXT_3, 11, false)
           }
+        }
+        .layoutWeight(1)
+        .alignItems(HorizontalAlign.Center)
+        .onClick(() => {
+          this.showModel = true;
+        })
+        .bindSheet(this.$showModel, () => {
+          this.modelSheet()
+        }, {
+          height: '88%',
+          dragBar: true
+        })
+
+        Row() {
+          IconSliders(COLOR_TEXT, 18)
+        }
+        .width(38).height(38)
+        .borderRadius(12)
+        .justifyContent(FlexAlign.Center)
+        .backgroundColor(COLOR_SURFACE)
+        .border({ width: 1, color: COLOR_BORDER })
+        .onClick(() => {
+          this.showSettings = true;
+        })
+        .bindSheet(this.$showSettings, () => {
+          this.settingsSheet()
+        }, {
+          height: '88%',
+          dragBar: true
         })
       }
       .width('100%')
-      .height('100%')
-      .bindSheet(this.$showModel, () => {
-        const cur: Session | null = this.current();
-        if (cur !== null) {
-          ModelSheetView({
-            session: cur,
-            toolsReady: this.toolsReady,
-            onChanged: (s: Session) => {
-              this.onSessionChanged(s);
-            },
-            onOpenSettings: () => {
-              this.showModel = false;
-              this.showSettings = true;
-            },
-            onClose: () => {
-              this.showModel = false;
+      .padding({ left: 14, right: 14, top: 10, bottom: 10 })
+      .backgroundColor('#F8F8FB')
+
+      // ------- messages -------
+      if (this.msgs.length === 0) {
+        this.emptyState()
+      } else {
+        List({ space: 22, scroller: this.scroller }) {
+          ListItem() {
+            Column().width('100%').height(4)
+          }
+          ForEach(this.msgs, (m: Msg) => {
+            ListItem() {
+              MessageView({
+                msg: m,
+                liveLabel: m.status === 'streaming' ? phaseLabel(this.phase) : '',
+                onRetry: () => {
+                  this.retryNow();
+                }
+              })
             }
+          }, (m: Msg) => m.id)
+          ListItem() {
+            Column().width('100%').height(4)
+          }
+        }
+        .layoutWeight(1)
+        .width('100%')
+        .padding({ left: 16, right: 16 })
+        .scrollBar(BarState.Off)
+        .edgeEffect(EdgeEffect.Spring)
+        .onScrollIndex((first: number, last: number) => {
+          this.atBottom = last >= this.msgs.length;
+        })
+      }
+
+      // ------- composer -------
+      Column({ space: 0 }) {
+        this.statusBar()
+        Row({ space: 10 }) {
+          TextArea({
+            text: this.inputText,
+            placeholder: '输入消息…'
           })
+            .fontSize(15)
+            .fontColor(COLOR_TEXT)
+            .placeholderColor(COLOR_TEXT_3)
+            .backgroundColor(COLOR_SURFACE)
+            .borderRadius(18)
+            .border({ width: 1, color: COLOR_BORDER })
+            .padding({ left: 15, right: 15, top: 11, bottom: 11 })
+            .maxLines(5)
+            .constraintSize({ minHeight: 46, maxHeight: 132 })
+            .layoutWeight(1)
+            .enterKeyType(EnterKeyType.Send)
+            .onChange((v: string) => {
+              this.inputText = v;
+            })
+            .onSubmit((): boolean => {
+              this.sendNow();
+              return true;
+            })
+
+          if (ENGINE.isRunning(this.currentId)) {
+            Column() {
+              IconStop('#FFFFFF', 19)
+            }
+            .width(46).height(46)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .borderRadius(23)
+            .linearGradient({ angle: 135, colors: [[COLOR_ERR, 0], ['#E86A64', 1]] })
+            .onClick(() => {
+              this.stopNow();
+            })
+          } else {
+            Column() {
+              IconSend('#FFFFFF', 21)
+            }
+            .width(46).height(46)
+            .justifyContent(FlexAlign.Center)
+            .alignItems(HorizontalAlign.Center)
+            .borderRadius(23)
+            .linearGradient({ angle: 135, colors: [[GRAD_PRIMARY[0], 0], [GRAD_PRIMARY[1], 1]] })
+            .opacity(this.inputText.trim().length > 0 ? 1 : 0.45)
+            .onClick(() => {
+              this.sendNow();
+            })
+          }
         }
-      }, {
-        height: '88%',
-        dragBar: true,
-        onDisappear: () => {
-          this.showModel = false;
-        }
-      })
+        .width('100%')
+        .alignItems(VerticalAlign.Bottom)
+      }
+      .width('100%')
+      .padding({ left: 14, right: 14, top: 8, bottom: 16 })
+      .backgroundColor('#F8F8FB')
     }
     .width('100%')
     .height('100%')
     .backgroundColor('#F4F4F7')
-    .bindSheet(this.$showSettings, () => {
-      SettingsSheetView({
-        getKey: (id: string) => {
-          return ENGINE.getKey(id);
-        },
-        getBaseUrl: (id: string, fallback: string) => {
-          return ENGINE.getBaseUrl(id, fallback);
-        },
-        onSave: (id: string, key: string, url: string) => {
-          this.onSettingsSave(id, key, url);
-        },
-        onClose: () => {
-          this.showSettings = false;
-        }
-      })
-    }, {
-      height: '88%',
-      dragBar: true,
-      onDisappear: () => {
-        this.showSettings = false;
-      }
-    })
   }
 }

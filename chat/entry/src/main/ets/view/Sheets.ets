@@ -51,6 +51,155 @@ struct SegPills {
   }
 }
 
+@Component
+struct ToggleRow {
+  label: string = '';
+  caption: string = '';
+  on: boolean = false;
+  onChange: (v: boolean) => void = (v: boolean) => {
+  };
+
+  build() {
+    Row({ space: 10 }) {
+      Column({ space: 2 }) {
+        Text(this.label)
+          .fontSize(14)
+          .fontColor(COLOR_TEXT)
+        if (this.caption.length > 0) {
+          Text(this.caption)
+            .fontSize(11)
+            .fontColor(COLOR_TEXT_3)
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1)
+
+      Toggle({ type: ToggleType.Switch, isOn: this.on })
+        .selectedColor(COLOR_PRIMARY)
+        .switchPointColor('#FFFFFF')
+        .onChange((v: boolean) => {
+          this.onChange(v);
+        })
+    }
+    .width('100%')
+    .padding(13)
+    .borderRadius(13)
+    .backgroundColor(COLOR_SURFACE)
+    .border({ width: 1, color: COLOR_BORDER })
+  }
+}
+
+@Component
+struct SegRow {
+  label: string = '';
+  labels: string[] = [];
+  values: string[] = [];
+  selected: string = '';
+  onPick: (v: string) => void = (v: string) => {
+  };
+
+  build() {
+    Column({ space: 9 }) {
+      Text(this.label)
+        .fontSize(12.5)
+        .fontColor(COLOR_TEXT_2)
+        .width('100%')
+      SegPills({
+        labels: this.labels,
+        values: this.values,
+        selected: this.selected,
+        onPick: (v: string) => {
+          this.onPick(v);
+        }
+      })
+    }
+    .width('100%')
+    .padding(13)
+    .borderRadius(13)
+    .backgroundColor(COLOR_SURFACE)
+    .border({ width: 1, color: COLOR_BORDER })
+    .alignItems(HorizontalAlign.Start)
+  }
+}
+
+@Component
+struct KeyCard {
+  title: string = '';
+  hint: string = '';
+  keyValue: string = '';
+  url: string = '';
+  configured: boolean = false;
+  showKey: boolean = false;
+  onKey: (v: string) => void = (v: string) => {
+  };
+  onUrl: (v: string) => void = (v: string) => {
+  };
+  onSave: () => void = () => {
+  };
+
+  build() {
+    Column({ space: 10 }) {
+      Row({ space: 8 }) {
+        Circle().width(8).height(8).fill(this.configured ? '#1F9D63' : '#C9C9D4')
+        Text(this.title)
+          .fontSize(14.5)
+          .fontWeight(FontWeight.Medium)
+          .fontColor(COLOR_TEXT)
+        Text(this.configured ? '已配置' : '未配置')
+          .fontSize(11)
+          .fontColor(this.configured ? '#1F9D63' : COLOR_TEXT_3)
+      }
+      .width('100%')
+
+      TextInput({ text: this.keyValue, placeholder: 'API Key' })
+        .type(this.showKey ? InputType.Normal : InputType.Password)
+        .fontSize(13.5)
+        .height(42)
+        .backgroundColor(COLOR_SURFACE_SOFT)
+        .borderRadius(11)
+        .padding({ left: 12, right: 12 })
+        .onChange((v: string) => {
+          this.onKey(v);
+        })
+
+      TextInput({ text: this.url, placeholder: 'Base URL' })
+        .type(InputType.Normal)
+        .fontSize(13.5)
+        .height(42)
+        .backgroundColor(COLOR_SURFACE_SOFT)
+        .borderRadius(11)
+        .padding({ left: 12, right: 12 })
+        .onChange((v: string) => {
+          this.onUrl(v);
+        })
+
+      Row({ space: 10 }) {
+        Text(this.hint)
+          .fontSize(10.5)
+          .fontColor(COLOR_TEXT_3)
+          .layoutWeight(1)
+        Text('保存')
+          .fontSize(12.5)
+          .fontColor('#FFFFFF')
+          .fontWeight(FontWeight.Medium)
+          .padding({ left: 16, right: 16, top: 7, bottom: 7 })
+          .borderRadius(999)
+          .backgroundColor(COLOR_PRIMARY)
+          .onClick(() => {
+            this.onSave();
+          })
+      }
+      .width('100%')
+    }
+    .width('100%')
+    .padding(14)
+    .borderRadius(15)
+    .backgroundColor(COLOR_SURFACE)
+    .border({ width: 1, color: COLOR_BORDER })
+    .alignItems(HorizontalAlign.Start)
+  }
+}
+
 /** ---------------- Conversation list ---------------- */
 
 @Component
@@ -270,60 +419,6 @@ export struct ModelSheetView {
       .margin({ top: 18, bottom: 8 })
   }
 
-  @Builder
-  toggleRow(label: string, caption: string, on: boolean, toggle: (v: boolean) => void) {
-    Row({ space: 10 }) {
-      Column({ space: 2 }) {
-        Text(label)
-          .fontSize(14)
-          .fontColor(COLOR_TEXT)
-        if (caption.length > 0) {
-          Text(caption)
-            .fontSize(11)
-            .fontColor(COLOR_TEXT_3)
-        }
-      }
-      .alignItems(HorizontalAlign.Start)
-      .layoutWeight(1)
-
-      Toggle({ type: ToggleType.Switch, isOn: on })
-        .selectedColor(COLOR_PRIMARY)
-        .switchPointColor('#FFFFFF')
-        .onChange((v: boolean) => {
-          toggle(v);
-        })
-    }
-    .width('100%')
-    .padding(13)
-    .borderRadius(13)
-    .backgroundColor(COLOR_SURFACE)
-    .border({ width: 1, color: COLOR_BORDER })
-  }
-
-  @Builder
-  segRow(label: string, labels: string[], values: string[], selected: string, pick: (v: string) => void) {
-    Column({ space: 9 }) {
-      Text(label)
-        .fontSize(12.5)
-        .fontColor(COLOR_TEXT_2)
-        .width('100%')
-      SegPills({
-        labels: labels,
-        values: values,
-        selected: selected,
-        onPick: (v: string) => {
-          pick(v);
-        }
-      })
-    }
-    .width('100%')
-    .padding(13)
-    .borderRadius(13)
-    .backgroundColor(COLOR_SURFACE)
-    .border({ width: 1, color: COLOR_BORDER })
-    .alignItems(HorizontalAlign.Start)
-  }
-
   build() {
     Column({ space: 0 }) {
       Row() {
@@ -406,36 +501,61 @@ export struct ModelSheetView {
           this.sectionLabel('模型选项')
           Column({ space: 10 }) {
             if (this.curModel().thinkingToggle) {
-              this.toggleRow('深度思考', '让模型先推理再回答', this.thinkingOn, (v: boolean) => {
-                this.thinkingOn = v;
-                this.commit();
+              ToggleRow({
+                label: '深度思考',
+                caption: '让模型先推理再回答',
+                on: this.thinkingOn,
+                onChange: (v: boolean) => {
+                  this.thinkingOn = v;
+                  this.commit();
+                }
               })
             }
             if (this.curModel().hasThinking && (this.thinkingOn || !this.curModel().thinkingToggle)) {
-              this.segRow('思考强度', this.curModel().thinkingLabels, this.curModel().thinkingLevels,
-                this.thinkingLevel, (v: string) => {
+              SegRow({
+                label: '思考强度',
+                labels: this.curModel().thinkingLabels,
+                values: this.curModel().thinkingLevels,
+                selected: this.thinkingLevel,
+                onPick: (v: string) => {
                   this.thinkingLevel = v;
                   this.commit();
-                })
+                }
+              })
             }
             if (this.curModel().reasoningMode) {
-              this.segRow('思考模式', ['标准', '深度'], ['standard', 'pro'], this.reasoningMode,
-                (v: string) => {
+              SegRow({
+                label: '思考模式',
+                labels: ['标准', '深度'],
+                values: ['standard', 'pro'],
+                selected: this.reasoningMode,
+                onPick: (v: string) => {
                   this.reasoningMode = v;
                   this.commit();
-                })
+                }
+              })
             }
             if (this.curModel().speedTiers.length > 0) {
-              this.segRow('响应速度', this.speedLabels(), this.speedValues(), this.speedTier,
-                (v: string) => {
+              SegRow({
+                label: '响应速度',
+                labels: this.speedLabels(),
+                values: this.speedValues(),
+                selected: this.speedTier,
+                onPick: (v: string) => {
                   this.speedTier = v;
                   this.commit();
-                })
+                }
+              })
             }
             if (this.curModel().diffusing) {
-              this.toggleRow('扩散输出', '实时展示文本去噪修订的过程', this.diffusing, (v: boolean) => {
-                this.diffusing = v;
-                this.commit();
+              ToggleRow({
+                label: '扩散输出',
+                caption: '实时展示文本去噪修订的过程',
+                on: this.diffusing,
+                onChange: (v: boolean) => {
+                  this.diffusing = v;
+                  this.commit();
+                }
               })
             }
           }
@@ -518,70 +638,6 @@ export struct SettingsSheetView {
     return key.trim().length > 0;
   }
 
-  @Builder
-  keyCard(title: string, hint: string, key: string, url: string,
-    keyChange: (v: string) => void, urlChange: (v: string) => void, save: () => void) {
-    Column({ space: 10 }) {
-      Row({ space: 8 }) {
-        Circle().width(8).height(8).fill(this.configured(key) ? '#1F9D63' : '#C9C9D4')
-        Text(title)
-          .fontSize(14.5)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(COLOR_TEXT)
-        Text(this.configured(key) ? '已配置' : '未配置')
-          .fontSize(11)
-          .fontColor(this.configured(key) ? '#1F9D63' : COLOR_TEXT_3)
-      }
-      .width('100%')
-
-      TextInput({ text: key, placeholder: 'API Key' })
-        .type(this.showKeys ? InputType.Normal : InputType.Password)
-        .fontSize(13.5)
-        .height(42)
-        .backgroundColor(COLOR_SURFACE_SOFT)
-        .borderRadius(11)
-        .padding({ left: 12, right: 12 })
-        .onChange((v: string) => {
-          keyChange(v);
-        })
-
-      TextInput({ text: url, placeholder: 'Base URL' })
-        .type(InputType.Normal)
-        .fontSize(13.5)
-        .height(42)
-        .backgroundColor(COLOR_SURFACE_SOFT)
-        .borderRadius(11)
-        .padding({ left: 12, right: 12 })
-        .onChange((v: string) => {
-          urlChange(v);
-        })
-
-      Row({ space: 10 }) {
-        Text(hint)
-          .fontSize(10.5)
-          .fontColor(COLOR_TEXT_3)
-          .layoutWeight(1)
-        Text('保存')
-          .fontSize(12.5)
-          .fontColor('#FFFFFF')
-          .fontWeight(FontWeight.Medium)
-          .padding({ left: 16, right: 16, top: 7, bottom: 7 })
-          .borderRadius(999)
-          .backgroundColor(COLOR_PRIMARY)
-          .onClick(() => {
-            save();
-          })
-      }
-      .width('100%')
-    }
-    .width('100%')
-    .padding(14)
-    .borderRadius(15)
-    .backgroundColor(COLOR_SURFACE)
-    .border({ width: 1, color: COLOR_BORDER })
-    .alignItems(HorizontalAlign.Start)
-  }
-
   build() {
     Column({ space: 0 }) {
       Row() {
@@ -611,50 +667,74 @@ export struct SettingsSheetView {
 
       Scroll() {
         Column({ space: 12 }) {
-          this.keyCard('DeepSeek', '联网搜索与抓取也使用此 Key',
-            this.dsKey, this.dsUrl,
-            (v: string) => {
+          KeyCard({
+            title: 'DeepSeek',
+            hint: '联网搜索与抓取也使用此 Key',
+            keyValue: this.dsKey,
+            url: this.dsUrl,
+            configured: this.configured(this.dsKey),
+            showKey: this.showKeys,
+            onKey: (v: string) => {
               this.dsKey = v;
             },
-            (v: string) => {
+            onUrl: (v: string) => {
               this.dsUrl = v;
             },
-            () => {
+            onSave: () => {
               this.onSave('deepseek', this.dsKey, this.dsUrl);
-            })
-          this.keyCard('OpenAI', 'Responses API 端点',
-            this.oaKey, this.oaUrl,
-            (v: string) => {
+            }
+          })
+          KeyCard({
+            title: 'OpenAI',
+            hint: 'Responses API 端点',
+            keyValue: this.oaKey,
+            url: this.oaUrl,
+            configured: this.configured(this.oaKey),
+            showKey: this.showKeys,
+            onKey: (v: string) => {
               this.oaKey = v;
             },
-            (v: string) => {
+            onUrl: (v: string) => {
               this.oaUrl = v;
             },
-            () => {
+            onSave: () => {
               this.onSave('openai', this.oaKey, this.oaUrl);
-            })
-          this.keyCard('Mercury', 'Chat Completions 端点',
-            this.mcKey, this.mcUrl,
-            (v: string) => {
+            }
+          })
+          KeyCard({
+            title: 'Mercury',
+            hint: 'Chat Completions 端点',
+            keyValue: this.mcKey,
+            url: this.mcUrl,
+            configured: this.configured(this.mcKey),
+            showKey: this.showKeys,
+            onKey: (v: string) => {
               this.mcKey = v;
             },
-            (v: string) => {
+            onUrl: (v: string) => {
               this.mcUrl = v;
             },
-            () => {
+            onSave: () => {
               this.onSave('mercury', this.mcKey, this.mcUrl);
-            })
-          this.keyCard('Gemini', 'Generate Content 端点',
-            this.ggKey, this.ggUrl,
-            (v: string) => {
+            }
+          })
+          KeyCard({
+            title: 'Gemini',
+            hint: 'Generate Content 端点',
+            keyValue: this.ggKey,
+            url: this.ggUrl,
+            configured: this.configured(this.ggKey),
+            showKey: this.showKeys,
+            onKey: (v: string) => {
               this.ggKey = v;
             },
-            (v: string) => {
+            onUrl: (v: string) => {
               this.ggUrl = v;
             },
-            () => {
+            onSave: () => {
               this.onSave('gemini', this.ggKey, this.ggUrl);
-            })
+            }
+          })
 
           Text('密钥仅保存在本机安全存储中，不会写入日志或上传。')
             .fontSize(11)
