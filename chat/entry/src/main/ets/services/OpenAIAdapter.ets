@@ -8,7 +8,7 @@
 import { ProviderAdapter, RequestSpec, TurnHandler, TurnSink, trimSlash } from './Adapter';
 import { Block, Msg, Session, BLOCK_TOOL, BLOCK_TEXT } from './Types';
 import { asArr, asRecord, getArr, getBool, getObj, getStr, hasKey, parseObj } from '../common/JsonUtil';
-import { ToolRunner } from './Tools';
+import { openaiToolsJson } from './ToolSchemas';
 
 function parseJsonArray(text: string): Object[] {
   if (text.length === 0) {
@@ -156,7 +156,7 @@ export class OpenAIAdapter implements ProviderAdapter {
       body['service_tier'] = 'ultrafast';
     }
     if (toolsEnabled) {
-      body['tools'] = parseJsonArray(ToolRunner.openaiToolsJson());
+      body['tools'] = parseJsonArray(openaiToolsJson());
     }
     spec.bodyJson = JSON.stringify(body);
     return spec;

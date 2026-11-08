@@ -441,7 +441,8 @@ struct Index {
   }
 
   build() {
-    Column() {
+    Stack() {
+      Column() {
       // ------- header -------
         Row({ space: 10 }) {
           Column() {
@@ -457,11 +458,6 @@ struct Index {
               this.showSessions = true;
             })
           }
-          .bindSheet(this.$showSessions, () => {
-            this.sessionsSheet()
-          }, {
-            dragBar: true
-          })
 
           Column() {
             Column({ space: 2 }) {
@@ -485,11 +481,6 @@ struct Index {
             })
           }
           .layoutWeight(1)
-          .bindSheet(this.$showModel, () => {
-            this.modelSheet()
-          }, {
-            dragBar: true
-          })
 
           Column() {
             Row() {
@@ -504,11 +495,6 @@ struct Index {
               this.showSettings = true;
             })
           }
-          .bindSheet(this.$showSettings, () => {
-            this.settingsSheet()
-          }, {
-            dragBar: true
-          })
         }
         .width('100%')
         .padding({ left: 14, right: 14, top: 10, bottom: 10 })
@@ -607,9 +593,70 @@ struct Index {
       .width('100%')
       .padding({ left: 14, right: 14, top: 8, bottom: 16 })
       .backgroundColor('#F8F8FB')
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor('#F4F4F7')
+
+      // ------- panels: conversation list / model options / api settings -------
+      if (this.showSessions) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('rgba(18,18,28,0.4)')
+          .onClick(() => {
+            this.showSessions = false;
+          })
+        Column() {
+          this.sessionsSheet()
+        }
+        .width('100%')
+        .height('82%')
+        .align(Alignment.Bottom)
+        .backgroundColor('#F8F8FB')
+        .borderRadius({ topLeft: 20, topRight: 20 })
+        .clip(true)
+      }
+
+      if (this.showModel) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('rgba(18,18,28,0.4)')
+          .onClick(() => {
+            this.showModel = false;
+          })
+        Column() {
+          this.modelSheet()
+        }
+        .width('100%')
+        .height('88%')
+        .align(Alignment.Bottom)
+        .backgroundColor('#F8F8FB')
+        .borderRadius({ topLeft: 20, topRight: 20 })
+        .clip(true)
+      }
+
+      if (this.showSettings) {
+        Column()
+          .width('100%')
+          .height('100%')
+          .backgroundColor('rgba(18,18,28,0.4)')
+          .onClick(() => {
+            this.showSettings = false;
+          })
+        Column() {
+          this.settingsSheet()
+        }
+        .width('100%')
+        .height('88%')
+        .align(Alignment.Bottom)
+        .backgroundColor('#F8F8FB')
+        .borderRadius({ topLeft: 20, topRight: 20 })
+        .clip(true)
+      }
     }
     .width('100%')
     .height('100%')
-    .backgroundColor('#F4F4F7')
   }
 }

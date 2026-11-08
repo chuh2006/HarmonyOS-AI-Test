@@ -10,7 +10,7 @@
 import { ProviderAdapter, RequestSpec, TurnHandler, TurnSink, trimSlash } from './Adapter';
 import { Block, Msg, Session, BLOCK_TOOL, BLOCK_TEXT } from './Types';
 import { asArr, asRecord, getArr, getBool, getObj, getStr, hasBool, hasKey, parseObj } from '../common/JsonUtil';
-import { ToolRunner } from './Tools';
+import { chatCompletionsToolsJson } from './ToolSchemas';
 
 function parseJsonArray(text: string): Object[] {
   if (text.length === 0) {
@@ -130,7 +130,7 @@ export class MercuryAdapter implements ProviderAdapter {
       'stream_options': opts
     };
     if (toolsEnabled) {
-      body['tools'] = parseJsonArray(ToolRunner.openaiToolsJson());
+      body['tools'] = parseJsonArray(chatCompletionsToolsJson());
     }
     spec.bodyJson = JSON.stringify(body);
     return spec;

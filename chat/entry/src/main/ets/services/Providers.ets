@@ -2,7 +2,7 @@
  * Provider / model catalog with per-model capability flags.
  * The settings UI only shows controls that the current model supports.
  */
-import { ProviderId } from './Types';
+import { ProviderId, SessionOptions } from './Types';
 
 export class ModelInfo {
   id: string = '';
@@ -159,4 +159,37 @@ export function defaultModelOf(providerId: string): string {
 
 export function providerShortName(providerId: string): string {
   return providerInfo(providerId).name;
+}
+
+/**
+ * Clamp session options to what the current model actually supports.
+ * Called before every request so that stale or hand-edited settings can
+ * never produce an invalid parameter combination.
+ */
+export function normalizeOptions(providerId: string, modelId: string, o: SessionOptions): void {
+  const info: ModelInfo = modelInfo(providerId, modelId);
+  if (!info.thinkingToggle) {
+    o.thinkingOn = true;
+  }
+  let lvlOk: boolean = false;
+  for (let i = 0; i < info.thinkingLevels.length; i++) {
+    if (info.thinkingLevels[i] === o.thinkingLevel) {
+      lvlOk = true;
+    }
+  }
+  if (!lvlOk && info.thinkingLevels.length > 0) {
+    o.thinkingLevel = info.thinkingLevels[0];
+  }
+  if (info.thinkingLevels.length === 0 && providerId === 'mercury') {
+    o.thinkingLevel = 'low';
+  }
+  if (info.reasoningMode && o.reasoningMode !== 'pro' && o.reasoningMode !== 'standard') {
+    o.reasoningMode = 'standard';
+  }
+  if (o.speedTier === 'ultrafast' && info.speedTiers.indexOf('ultrafast') < 0) {
+    o.speedTier = info.speedTiers.indexOf('fast') >= 0 ? 'fast' : 'standard';
+  }
+  if (o.speedTier === 'fast' && info.speedTiers.indexOf('fast') < 0) {
+    o.speedTier = 'standard';
+  }
 }

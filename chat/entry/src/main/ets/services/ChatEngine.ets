@@ -27,7 +27,7 @@ import { MercuryAdapter } from './MercuryAdapter';
 import { GeminiAdapter } from './GeminiAdapter';
 import { SecureStore } from './SecureStore';
 import { SessionStore } from './SessionStore';
-import { providerInfo } from './Providers';
+import { normalizeOptions, providerInfo } from './Providers';
 import { newId } from '../common/Util';
 
 const MAX_ROUNDS: number = 8;
@@ -463,6 +463,7 @@ export class ChatEngine {
     const apiKey: string = this.getKey(session.providerId);
     const baseUrl: string = this.getBaseUrl(session.providerId,
       providerInfo(session.providerId).defaultBaseUrl);
+    normalizeOptions(session.providerId, session.modelId, session.options);
     const toolsEnabled: boolean = ToolRunner.available(this.getKey('deepseek'));
     const spec: RequestSpec = adapter.buildRequest(session, session.messages, toolsEnabled,
       apiKey, baseUrl);

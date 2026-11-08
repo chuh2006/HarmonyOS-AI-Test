@@ -8,7 +8,7 @@
 import { ProviderAdapter, RequestSpec, TurnHandler, TurnSink, trimSlash } from './Adapter';
 import { Block, Msg, Session, BLOCK_TOOL, BLOCK_TEXT } from './Types';
 import { asArr, asRecord, getObj, getStr, hasKey, parseObj } from '../common/JsonUtil';
-import { ToolRunner } from './Tools';
+import { anthropicToolsJson } from './ToolSchemas';
 class DsBlock {
   index: number = 0;
   type: string = '';
@@ -170,7 +170,7 @@ export class DeepSeekAdapter implements ProviderAdapter {
       body['thinking'] = think;
     }
     if (toolsEnabled) {
-      body['tools'] = parseJsonArray(ToolRunner.anthropicToolsJson());
+      body['tools'] = parseJsonArray(anthropicToolsJson());
       const choice: Record<string, Object> = { 'type': 'auto' };
       body['tool_choice'] = choice;
     }

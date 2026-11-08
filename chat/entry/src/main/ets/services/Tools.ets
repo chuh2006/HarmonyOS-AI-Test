@@ -19,12 +19,6 @@ export class ToolOutcome {
   detail: string = '';
 }
 
-const OPENAI_TOOLS_JSON: string = `[{"type":"function","name":"search","description":"搜索互联网网页，返回与查询相关的结构化搜索结果（标题、链接、摘要）。当你需要查找实时信息、新闻、事实核对或不了解的内容时使用该工具。","parameters":{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词，1-128 个字符"},"count":{"type":"integer","description":"返回结果条数，默认 5，最多 10"}},"required":["query"]}},{"type":"function","name":"fetch","description":"抓取一个网页并返回其正文的 Markdown 文本。当你已经知道具体网址、或需要阅读某篇搜索结果的全文时使用该工具。","parameters":{"type":"object","properties":{"url":{"type":"string","description":"要抓取的 HTTP/HTTPS 网页地址"}},"required":["url"]}}]`;
-
-const ANTHROPIC_TOOLS_JSON: string = `[{"name":"search","description":"搜索互联网网页，返回与查询相关的结构化搜索结果（标题、链接、摘要）。当你需要查找实时信息、新闻、事实核对或不了解的内容时使用该工具。","input_schema":{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词，1-128 个字符"},"count":{"type":"integer","description":"返回结果条数，默认 5，最多 10"}},"required":["query"]}},{"name":"fetch","description":"抓取一个网页并返回其正文的 Markdown 文本。当你已经知道具体网址、或需要阅读某篇搜索结果的全文时使用该工具。","input_schema":{"type":"object","properties":{"url":{"type":"string","description":"要抓取的 HTTP/HTTPS 网页地址"}},"required":["url"]}}]`;
-
-const GEMINI_TOOLS_JSON: string = `[{"functionDeclarations":[{"name":"search","description":"搜索互联网网页，返回与查询相关的结构化搜索结果（标题、链接、摘要）。当你需要查找实时信息、新闻、事实核对或不了解的内容时使用该工具。","parameters":{"type":"object","properties":{"query":{"type":"string","description":"搜索关键词，1-128 个字符"},"count":{"type":"integer","description":"返回结果条数，默认 5，最多 10"}},"required":["query"]}},{"name":"fetch","description":"抓取一个网页并返回其正文的 Markdown 文本。当你已经知道具体网址、或需要阅读某篇搜索结果的全文时使用该工具。","parameters":{"type":"object","properties":{"url":{"type":"string","description":"要抓取的 HTTP/HTTPS 网页地址"}},"required":["url"]}}]}]`;
-
 function errorJson(message: string): string {
   const rec: Record<string, Object> = { 'error': message };
   return JSON.stringify(rec);
@@ -40,21 +34,6 @@ function authHeaders(apiKey: string): Record<string, string> {
 export class ToolRunner {
   static available(apiKey: string): boolean {
     return apiKey.trim().length > 0;
-  }
-
-  /** OpenAI function style tool list (also used by Mercury). */
-  static openaiToolsJson(): string {
-    return OPENAI_TOOLS_JSON;
-  }
-
-  /** Anthropic style tool list for the DeepSeek Messages API. */
-  static anthropicToolsJson(): string {
-    return ANTHROPIC_TOOLS_JSON;
-  }
-
-  /** Gemini functionDeclarations style tool list. */
-  static geminiToolsJson(): string {
-    return GEMINI_TOOLS_JSON;
   }
 
   static run(name: string, argsJson: string, apiKey: string): Promise<ToolOutcome> {
