@@ -123,20 +123,26 @@ Fetch：
 
 ## 五、Google Gemini
 
-本题使用 Gemini 原生 Generate Content REST API，接入 `gemini-3.8-flash`、`gemini-4-argon`：
+使用 Gemini 原生 Generate Content REST API **和** Interactions REST API，接入 `gemini-4-hydrogen`、`gemini-4-argon`、`gemini-4-carbon`：
 
-- 流式端点：与模型名有关，示例：`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse`
+- 流式端点：Generate Content API 与模型名有关，示例：`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse`；Interactions API 固定 `https://generativelanguage.googleapis.com/v1beta/interactions?alt=sse`，相关参数由请求体控制。
 - 使用 `x-goog-api-key` 认证。
 - 支持模型实际提供的思考强度配置，并开启思考摘要。
+
+对于 Generate Content API：
 - 正确解析 `candidates[].content.parts[]`，分别处理回答文本、思考摘要、函数调用和签名元数据。
 - 思考摘要根据 `thought` 标记识别并实时展示；摘要为空时也应正常完成请求。
 - 正确处理 `thoughtSignature`：将其作为服务端返回的不透明数据原样保存和回传，保留与原始 Part 的对应关系和顺序。
 - 支持带签名的函数调用及工具结果回传，保存历史后重启 APP，继续对话时签名和工具上下文应完整恢复。
 - 不同 Part 的签名需要保持各自归属，不能通过把整条模型消息压成一个字符串而丢失结构。
 
+而 Interactions API 大幅简化了逻辑，这里不再复述要求，但是必须确保所有必要内容全部保留和回传，并且允许用户在 APP 中随时切换 API 协议而不丢失内容。
+
 注意：这里的“加密签名”指 Gemini 的 thought signature。思考摘要用于展示，签名用于保持协议上下文，两者分别存储和处理。
 
 请求体示意：
+
+Generate Content：
 
 ```json
 {
@@ -146,6 +152,19 @@ Fetch：
   "generationConfig": {
     "thinkingConfig": {"includeThoughts": true}
   }
+}
+```
+
+Interactions：
+
+```json
+{
+  "model": "gemini-4-hydrogen",
+  "input": "Explain how AI works",
+  "generation_config": {
+    "thinking_level": "high"
+  },
+  "stream": true
 }
 ```
 
@@ -181,6 +200,7 @@ Fetch：
 - DeepSeek 网页搜索与抓取：https://api-docs.deepseek.com/zh-cn/guides/search
 - DeepSeek Search API 参考：https://api-docs.deepseek.com/zh-cn/api/search
 - DeepSeek Fetch API 参考：https://api-docs.deepseek.com/zh-cn/api/fetch
+- Anthropic Message API 参考：https://platform.claude.com/docs/en/api/http/messages/create
 - OpenAI Responses API 概览：https://developers.openai.com/api/reference/responses/overview
 - OpenAI 文本生成：https://developers.openai.com/api/docs/guides/text
 - OpenAI 模型思考模式：https://developers.openai.com/api/docs/guides/reasoning
@@ -192,8 +212,11 @@ Fetch：
 - Gemini Generate Content REST：https://ai.google.dev/api/generate-content
 - Gemini Generate Content 思考摘要：https://ai.google.dev/gemini-api/docs/generate-content/thinking
 - Gemini Generate Content 签名：https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+- Gemini Interaction 相关文档只需移除 Generate Content 文档 URL 地址中的 `generate-content`。
+
 
 ## 必须严格遵守的强制要求
 
-- **禁止使用 Git。**
-- **禁止读取工作目录的上一级目录及其中其他文件，包括 `..`，即使仅列出文件名也不允许。你的工作目录中的 `chat` 是项目根目录。**
+- **禁止使用 Git，但如果添加了无需被 Git 跟踪的文件或目录，请添加到 `.gitignore` 中。**
+- **禁止读取工作目录的上一级目录及其中其他文件，包括 `..`，即使仅列出文件名也不允许。你的工作目录是 `minichat`， 其中的 `chat` 是项目根目录。**
+- **授予你一个目录或文件的访问权限不代表你自动获得该目录或文件所在目录的其他目录或文件的访问权限，切记。**
