@@ -181,6 +181,7 @@ Fetch：
 - DeepSeek 网页搜索与抓取：https://api-docs.deepseek.com/zh-cn/guides/search
 - DeepSeek Search API 参考：https://api-docs.deepseek.com/zh-cn/api/search
 - DeepSeek Fetch API 参考：https://api-docs.deepseek.com/zh-cn/api/fetch
+- Anthropic Message API 参考：https://platform.claude.com/docs/en/api/http/messages/create
 - OpenAI Responses API 概览：https://developers.openai.com/api/reference/responses/overview
 - OpenAI 文本生成：https://developers.openai.com/api/docs/guides/text
 - OpenAI 模型思考模式：https://developers.openai.com/api/docs/guides/reasoning
@@ -192,6 +193,8 @@ Fetch：
 - Gemini Generate Content REST：https://ai.google.dev/api/generate-content
 - Gemini Generate Content 思考摘要：https://ai.google.dev/gemini-api/docs/generate-content/thinking
 - Gemini Generate Content 签名：https://ai.google.dev/gemini-api/docs/generate-content/thought-signatures
+- Gemini Interaction 相关文档只需移除 URL 地址中的 `generate-content`。
+
 
 ## 必须严格遵守的强制要求
 
